@@ -43,12 +43,16 @@ final class GoogleProvider implements ProviderInterface
 {
     private const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
-    // Model aliases for convenience
+    // Gemini model aliases
     public const MODEL_3_1_PRO = 'gemini-3.1-pro';
     public const MODEL_3_0_PRO = 'gemini-3.0-pro';
     public const MODEL_2_0_FLASH = 'gemini-2.0-flash-exp';
     public const MODEL_1_5_PRO = 'gemini-1.5-pro';
     public const MODEL_1_5_FLASH = 'gemini-1.5-flash';
+
+    // Imagen model aliases for image generation
+    public const IMAGEN_3 = 'imagen-3.0-generate-001';
+    public const IMAGEN_3_FAST = 'imagen-3.0-fast-generate-001';
 
     public function __construct(
         private readonly string $apiKey,
@@ -102,6 +106,95 @@ final class GoogleProvider implements ProviderInterface
     public function getName(): string
     {
         return 'google';
+    }
+
+    /**
+     * Generate an image using Google's Imagen API.
+     *
+     * @param string $prompt The image generation prompt
+     * @param array{
+     *     model?: string,
+     *     numberOfImages?: int,
+     *     aspectRatio?: string,
+     *     negativePrompt?: string,
+     *     personGeneration?: string,
+     * } $options Generation options
+     * @return array{
+     *     images: array<array{
+     *         mimeType: string,
+     *         data: string,
+     *     }>,
+     * }
+     */
+    public function generateImage(string $prompt, array $options = []): array
+    {
+        $model = $options['model'] ?? self::IMAGEN_3;
+        $numberOfImages = $options['numberOfImages'] ?? 1;
+        $aspectRatio = $options['aspectRatio'] ?? '1:1';
+
+        $payload = [
+            'instances' => [
+                ['prompt' => $prompt],
+            ],
+            'parameters' => [
+                'sampleCount' => $numberOfImages,
+                'aspectRatio' => $aspectRatio,
+            ],
+        ];
+
+        if (isset($options['negativePrompt'])) {
+            $payload['parameters']['negativePrompt'] = $options['negativePrompt'];
+        }
+
+        // Allow/disallow person generation (default: allow_adult)
+        $payload['parameters']['personGeneration'] = $options['personGeneration'] ?? 'allow_adult';
+
+        $url = self::API_BASE . "/{$model}:predict?key={$this->apiKey}";
+        $response = $this->request($url, $payload);
+
+        $images = [];
+        foreach ($response['predictions'] ?? [] as $prediction) {
+            if (isset($prediction['bytesBase64Encoded'])) {
+                $images[] = [
+                    'mimeType' => $prediction['mimeType'] ?? 'image/png',
+                    'data' => $prediction['bytesBase64Encoded'],
+                ];
+            }
+        }
+
+        return ['images' => $images];
+    }
+
+    /**
+     * Generate an image and save it to a file.
+     *
+     * @param string $prompt The image generation prompt
+     * @param string $outputPath Path to save the image
+     * @param array $options Generation options
+     * @return string The path to the saved image
+     */
+    public function generateImageToFile(string $prompt, string $outputPath, array $options = []): string
+    {
+        $result = $this->generateImage($prompt, $options);
+
+        if (empty($result['images'])) {
+            throw new RuntimeException('No images generated');
+        }
+
+        $image = $result['images'][0];
+        $data = base64_decode($image['data']);
+
+        if ($data === false) {
+            throw new RuntimeException('Failed to decode image data');
+        }
+
+        $written = file_put_contents($outputPath, $data);
+
+        if ($written === false) {
+            throw new RuntimeException("Failed to write image to: {$outputPath}");
+        }
+
+        return $outputPath;
     }
 
     /**
