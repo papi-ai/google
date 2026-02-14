@@ -15,6 +15,7 @@ declare(strict_types=1);
 namespace PapiAI\Google;
 
 use Generator;
+use PapiAI\Core\Contracts\ImageProviderInterface;
 use PapiAI\Core\Contracts\ProviderInterface;
 use PapiAI\Core\Message;
 use PapiAI\Core\Response;
@@ -39,20 +40,24 @@ use RuntimeException;
  * - gemini-1.5-pro (proven quality)
  * - gemini-1.5-flash (fast, cost-effective)
  */
-final class GoogleProvider implements ProviderInterface
+final class GoogleProvider implements ProviderInterface, ImageProviderInterface
 {
     private const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
     // Gemini model aliases
     public const MODEL_3_1_PRO = 'gemini-3.1-pro';
     public const MODEL_3_0_PRO = 'gemini-3.0-pro';
-    public const MODEL_2_0_FLASH = 'gemini-2.0-flash-exp';
+    public const MODEL_3_PRO_IMAGE = 'gemini-3-pro-image-preview';
+    public const MODEL_2_5_FLASH = 'gemini-2.5-flash';
+    public const MODEL_2_0_FLASH = 'gemini-2.0-flash';
     public const MODEL_1_5_PRO = 'gemini-1.5-pro';
     public const MODEL_1_5_FLASH = 'gemini-1.5-flash';
 
-    // Imagen model aliases for image generation
-    public const IMAGEN_3 = 'imagen-3.0-generate-001';
-    public const IMAGEN_3_FAST = 'imagen-3.0-fast-generate-001';
+    // Imagen model aliases for image generation and editing
+    public const IMAGEN_4 = 'imagen-4.0-generate-001';
+    public const IMAGEN_4_ULTRA = 'imagen-4.0-ultra-generate-001';
+    public const IMAGEN_4_FAST = 'imagen-4.0-fast-generate-001';
+    public const IMAGEN_EDIT = 'imagen-3.0-capability-001';
 
     public function __construct(
         private readonly string $apiKey,
@@ -108,8 +113,18 @@ final class GoogleProvider implements ProviderInterface
         return 'google';
     }
 
+    public function supportsImageGeneration(): bool
+    {
+        return true;
+    }
+
+    public function supportsImageEditing(): bool
+    {
+        return true;
+    }
+
     /**
-     * Generate an image using Google's Imagen API.
+     * Generate an image using Google's Imagen 4 API.
      *
      * @param string $prompt The image generation prompt
      * @param array{
@@ -117,7 +132,6 @@ final class GoogleProvider implements ProviderInterface
      *     numberOfImages?: int,
      *     aspectRatio?: string,
      *     negativePrompt?: string,
-     *     personGeneration?: string,
      * } $options Generation options
      * @return array{
      *     images: array<array{
@@ -128,10 +142,11 @@ final class GoogleProvider implements ProviderInterface
      */
     public function generateImage(string $prompt, array $options = []): array
     {
-        $model = $options['model'] ?? self::IMAGEN_3;
+        $model = $options['model'] ?? self::IMAGEN_4_FAST;
         $numberOfImages = $options['numberOfImages'] ?? 1;
         $aspectRatio = $options['aspectRatio'] ?? '1:1';
 
+        // Imagen 4 uses the predict endpoint with instances/parameters format
         $payload = [
             'instances' => [
                 ['prompt' => $prompt],
@@ -139,20 +154,18 @@ final class GoogleProvider implements ProviderInterface
             'parameters' => [
                 'sampleCount' => $numberOfImages,
                 'aspectRatio' => $aspectRatio,
+                'outputOptions' => [
+                    'mimeType' => 'image/png',
+                ],
             ],
         ];
-
-        if (isset($options['negativePrompt'])) {
-            $payload['parameters']['negativePrompt'] = $options['negativePrompt'];
-        }
-
-        // Allow/disallow person generation (default: allow_adult)
-        $payload['parameters']['personGeneration'] = $options['personGeneration'] ?? 'allow_adult';
 
         $url = self::API_BASE . "/{$model}:predict?key={$this->apiKey}";
         $response = $this->request($url, $payload);
 
         $images = [];
+
+        // Imagen returns predictions with bytesBase64Encoded
         foreach ($response['predictions'] ?? [] as $prediction) {
             if (isset($prediction['bytesBase64Encoded'])) {
                 $images[] = [
@@ -162,7 +175,149 @@ final class GoogleProvider implements ProviderInterface
             }
         }
 
+        // Also check generateImages response format
+        foreach ($response['generatedImages'] ?? [] as $image) {
+            if (isset($image['image']['imageBytes'])) {
+                $images[] = [
+                    'mimeType' => 'image/png',
+                    'data' => $image['image']['imageBytes'],
+                ];
+            }
+        }
+
         return ['images' => $images];
+    }
+
+    /**
+     * Edit an existing image using AI.
+     *
+     * Uses Gemini's image generation models to edit/enhance images.
+     * Supports multi-turn editing via thoughtSignature preservation.
+     *
+     * @param string $imageUrl URL of the source image to edit
+     * @param string $prompt Instructions for how to edit the image
+     * @param array{
+     *     model?: string,
+     *     aspectRatio?: string,
+     *     imageSize?: string,
+     * } $options Edit options
+     * @return array{images: array<array{mimeType: string, data: string}>, text: string}
+     */
+    public function editImage(string $imageUrl, string $prompt, array $options = []): array
+    {
+        // Fetch the source image with browser-like headers
+        $imageData = $this->fetchImage($imageUrl);
+        if ($imageData === false) {
+            throw new RuntimeException("Failed to fetch image from: {$imageUrl}");
+        }
+
+        $base64Image = base64_encode($imageData);
+        $mimeType = $this->detectMimeType($imageUrl, $imageData);
+
+        $model = $options['model'] ?? self::MODEL_3_PRO_IMAGE;
+        $aspectRatio = $options['aspectRatio'] ?? '1:1';
+        $imageSize = $options['imageSize'] ?? '2K';
+
+        $payload = [
+            'contents' => [
+                [
+                    'parts' => [
+                        [
+                            'inlineData' => [
+                                'mimeType' => $mimeType,
+                                'data' => $base64Image,
+                            ],
+                        ],
+                        ['text' => $prompt],
+                    ],
+                ],
+            ],
+            'generationConfig' => [
+                'responseModalities' => ['TEXT', 'IMAGE'],
+                'imageConfig' => [
+                    'aspectRatio' => $aspectRatio,
+                    'imageSize' => $imageSize,
+                ],
+            ],
+        ];
+
+        $url = self::API_BASE . "/{$model}:generateContent?key={$this->apiKey}";
+        $response = $this->request($url, $payload);
+
+        return $this->parseImageResponse($response);
+    }
+
+    /**
+     * Parse an image generation/editing response.
+     *
+     * Handles Gemini's thought process: parts with "thought": true are
+     * intermediate reasoning images. The final output has "thoughtSignature".
+     *
+     * @return array{images: array<array{mimeType: string, data: string}>, text: string}
+     */
+    private function parseImageResponse(array $response): array
+    {
+        $images = [];
+        $text = '';
+
+        foreach ($response['candidates'] ?? [] as $candidate) {
+            foreach ($candidate['content']['parts'] ?? [] as $part) {
+                // Skip intermediate thought images
+                if (!empty($part['thought'])) {
+                    continue;
+                }
+
+                if (isset($part['inlineData'])) {
+                    $images[] = [
+                        'mimeType' => $part['inlineData']['mimeType'] ?? 'image/png',
+                        'data' => $part['inlineData']['data'],
+                    ];
+                } elseif (isset($part['text'])) {
+                    $text .= $part['text'];
+                }
+            }
+        }
+
+        return ['images' => $images, 'text' => $text];
+    }
+
+    /**
+     * Fetch an image from URL with proper headers.
+     */
+    private function fetchImage(string $url): string|false
+    {
+        $context = stream_context_create([
+            'http' => [
+                'header' => implode("\r\n", [
+                    'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept: image/webp,image/apng,image/*,*/*;q=0.8',
+                    'Accept-Language: en-US,en;q=0.9',
+                ]),
+                'timeout' => 30,
+            ],
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+            ],
+        ]);
+
+        return @file_get_contents($url, false, $context);
+    }
+
+    /**
+     * Detect MIME type from URL or content.
+     */
+    private function detectMimeType(string $url, string $data): string
+    {
+        $extension = strtolower(pathinfo(parse_url($url, PHP_URL_PATH) ?? '', PATHINFO_EXTENSION));
+
+        return match ($extension) {
+            'jpg', 'jpeg' => 'image/jpeg',
+            'png' => 'image/png',
+            'gif' => 'image/gif',
+            'webp' => 'image/webp',
+            default => 'image/jpeg',
+        };
     }
 
     /**
