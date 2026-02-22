@@ -45,10 +45,13 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
     private const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
     // Gemini model aliases
-    public const MODEL_3_1_PRO = 'gemini-3.1-pro';
-    public const MODEL_3_0_PRO = 'gemini-3.0-pro';
+    public const MODEL_3_1_PRO = 'gemini-3.1-pro-preview';
+    public const MODEL_3_0_PRO = 'gemini-3-pro-preview';
+    public const MODEL_3_FLASH = 'gemini-3-flash-preview';
     public const MODEL_3_PRO_IMAGE = 'gemini-3-pro-image-preview';
+    public const MODEL_2_5_PRO = 'gemini-2.5-pro';
     public const MODEL_2_5_FLASH = 'gemini-2.5-flash';
+    public const MODEL_2_5_FLASH_LITE = 'gemini-2.5-flash-lite';
     public const MODEL_2_0_FLASH = 'gemini-2.0-flash';
     public const MODEL_1_5_PRO = 'gemini-1.5-pro';
     public const MODEL_1_5_FLASH = 'gemini-1.5-flash';
@@ -58,6 +61,9 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
     public const IMAGEN_4_ULTRA = 'imagen-4.0-ultra-generate-001';
     public const IMAGEN_4_FAST = 'imagen-4.0-fast-generate-001';
     public const IMAGEN_EDIT = 'imagen-3.0-capability-001';
+
+    /** @var array<string, string> tool call ID → thought signature */
+    private array $thoughtSignatures = [];
 
     public function __construct(
         private readonly string $apiKey,
@@ -435,12 +441,16 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
                 $parts[] = ['text' => $message->getText()];
             }
             foreach ($message->toolCalls as $toolCall) {
-                $parts[] = [
+                $part = [
                     'functionCall' => [
                         'name' => $toolCall->name,
-                        'args' => $toolCall->arguments,
+                        'args' => (object) $toolCall->arguments,
                     ],
                 ];
+                if (isset($this->thoughtSignatures[$toolCall->id])) {
+                    $part['thoughtSignature'] = $this->thoughtSignatures[$toolCall->id];
+                }
+                $parts[] = $part;
             }
         } elseif (is_array($message->content)) {
             // Multimodal content
@@ -529,11 +539,15 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
                 $text .= $part['text'];
             } elseif (isset($part['functionCall'])) {
                 $fc = $part['functionCall'];
-                $toolCalls[] = new ToolCall(
+                $toolCall = new ToolCall(
                     id: $fc['name'], // Gemini uses name as ID
                     name: $fc['name'],
                     arguments: $fc['args'] ?? [],
                 );
+                if (isset($part['thoughtSignature'])) {
+                    $this->thoughtSignatures[$toolCall->id] = $part['thoughtSignature'];
+                }
+                $toolCalls[] = $toolCall;
             }
         }
 
