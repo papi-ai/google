@@ -1,6 +1,6 @@
 # PapiAI Google Provider
 
-[![Tests](https://github.com/papi-ai/google/workflows/Tests/badge.svg)](https://github.com/papi-ai/google/actions?query=workflow%3ATests)
+[![Tests](https://github.com/papi-ai/google/workflows/CI/badge.svg)](https://github.com/papi-ai/google/actions?query=workflow%3ACI)
 
 Google Gemini provider for [PapiAI](https://github.com/papi-ai/papi-core) - A simple but powerful PHP library for building AI agents.
 
