@@ -12,8 +12,10 @@
 
 declare(strict_types=1);
 
+use PapiAI\Core\Contracts\EmbeddingProviderInterface;
 use PapiAI\Core\Contracts\ImageProviderInterface;
 use PapiAI\Core\Contracts\ProviderInterface;
+use PapiAI\Core\EmbeddingResponse;
 use PapiAI\Core\Message;
 use PapiAI\Core\Response;
 use PapiAI\Core\StreamChunk;
@@ -28,6 +30,7 @@ class TestableGoogleProvider extends GoogleProvider
     public string $lastUrl = '';
     public array $lastPayload = [];
     public array $fakeResponse = [];
+    public array $fakeEmbeddingResponse = [];
     public array $fakeStreamEvents = [];
     public string $fakeImageData = 'fake-image-binary-data';
 
@@ -49,6 +52,14 @@ class TestableGoogleProvider extends GoogleProvider
         }
     }
 
+    protected function embeddingRequest(array $payload, string $url): array
+    {
+        $this->lastUrl = $url;
+        $this->lastPayload = $payload;
+
+        return $this->fakeEmbeddingResponse;
+    }
+
     protected function fetchImage(string $url): string|false
     {
         return $this->fakeImageData;
@@ -67,6 +78,10 @@ describe('GoogleProvider', function () {
 
         it('implements ImageProviderInterface', function () {
             expect($this->provider)->toBeInstanceOf(ImageProviderInterface::class);
+        });
+
+        it('implements EmbeddingProviderInterface', function () {
+            expect($this->provider)->toBeInstanceOf(EmbeddingProviderInterface::class);
         });
 
         it('returns google as name', function () {
@@ -576,6 +591,73 @@ describe('GoogleProvider', function () {
 
             expect($result['images'])->toHaveCount(1);
             expect($result['images'][0]['data'])->toBe('final-image');
+        });
+    });
+
+    describe('embed', function () {
+        it('embeds a single string input', function () {
+            $this->provider->fakeEmbeddingResponse = [
+                'embedding' => [
+                    'values' => [0.1, 0.2, 0.3],
+                ],
+            ];
+
+            $response = $this->provider->embed('Hello world');
+
+            expect($response)->toBeInstanceOf(EmbeddingResponse::class);
+            expect($response->embeddings)->toBe([[0.1, 0.2, 0.3]]);
+            expect($response->model)->toBe('text-embedding-004');
+            expect($this->provider->lastUrl)->toContain(':embedContent');
+            expect($this->provider->lastUrl)->toContain('text-embedding-004');
+            expect($this->provider->lastPayload['model'])->toBe('models/text-embedding-004');
+            expect($this->provider->lastPayload['content']['parts'][0]['text'])->toBe('Hello world');
+        });
+
+        it('embeds an array of inputs using batch endpoint', function () {
+            $this->provider->fakeEmbeddingResponse = [
+                'embeddings' => [
+                    ['values' => [0.1, 0.2, 0.3]],
+                    ['values' => [0.4, 0.5, 0.6]],
+                ],
+            ];
+
+            $response = $this->provider->embed(['Hello', 'World']);
+
+            expect($response)->toBeInstanceOf(EmbeddingResponse::class);
+            expect($response->embeddings)->toBe([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]);
+            expect($response->count())->toBe(2);
+            expect($this->provider->lastUrl)->toContain(':batchEmbedContents');
+            expect($this->provider->lastPayload['requests'])->toHaveCount(2);
+            expect($this->provider->lastPayload['requests'][0]['content']['parts'][0]['text'])->toBe('Hello');
+            expect($this->provider->lastPayload['requests'][1]['content']['parts'][0]['text'])->toBe('World');
+        });
+
+        it('uses custom model', function () {
+            $this->provider->fakeEmbeddingResponse = [
+                'embedding' => [
+                    'values' => [0.1, 0.2],
+                ],
+            ];
+
+            $response = $this->provider->embed('Test', ['model' => 'text-embedding-005']);
+
+            expect($response->model)->toBe('text-embedding-005');
+            expect($this->provider->lastUrl)->toContain('text-embedding-005');
+            expect($this->provider->lastPayload['model'])->toBe('models/text-embedding-005');
+        });
+
+        it('parses response with correct structure', function () {
+            $this->provider->fakeEmbeddingResponse = [
+                'embedding' => [
+                    'values' => [0.1, 0.2, 0.3, 0.4],
+                ],
+            ];
+
+            $response = $this->provider->embed('Test');
+
+            expect($response->first())->toBe([0.1, 0.2, 0.3, 0.4]);
+            expect($response->dimensions())->toBe(4);
+            expect($response->count())->toBe(1);
         });
     });
 

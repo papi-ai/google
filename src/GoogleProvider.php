@@ -15,8 +15,10 @@ declare(strict_types=1);
 namespace PapiAI\Google;
 
 use Generator;
+use PapiAI\Core\Contracts\EmbeddingProviderInterface;
 use PapiAI\Core\Contracts\ImageProviderInterface;
 use PapiAI\Core\Contracts\ProviderInterface;
+use PapiAI\Core\EmbeddingResponse;
 use PapiAI\Core\Message;
 use PapiAI\Core\Response;
 use PapiAI\Core\Role;
@@ -40,7 +42,7 @@ use RuntimeException;
  * - gemini-1.5-pro (proven quality)
  * - gemini-1.5-flash (fast, cost-effective)
  */
-class GoogleProvider implements ProviderInterface, ImageProviderInterface
+class GoogleProvider implements ProviderInterface, ImageProviderInterface, EmbeddingProviderInterface
 {
     private const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -247,6 +249,61 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface
         $response = $this->request($url, $payload);
 
         return $this->parseImageResponse($response);
+    }
+
+    /**
+     * Generate embeddings for the given input(s).
+     *
+     * @param string|array<string> $input One or more texts to embed
+     * @param array{
+     *     model?: string,
+     *     dimensions?: int,
+     * } $options Provider-specific options
+     */
+    public function embed(string|array $input, array $options = []): EmbeddingResponse
+    {
+        $model = $options['model'] ?? 'text-embedding-004';
+        $inputs = is_array($input) ? $input : [$input];
+
+        if (count($inputs) === 1) {
+            $url = self::API_BASE . "/{$model}:embedContent?key={$this->apiKey}";
+            $payload = [
+                'model' => "models/{$model}",
+                'content' => [
+                    'parts' => [['text' => $inputs[0]]],
+                ],
+            ];
+
+            $response = $this->embeddingRequest($payload, $url);
+
+            return new EmbeddingResponse(
+                embeddings: [$response['embedding']['values']],
+                model: $model,
+            );
+        }
+
+        $url = self::API_BASE . "/{$model}:batchEmbedContents?key={$this->apiKey}";
+        $requests = [];
+        foreach ($inputs as $text) {
+            $requests[] = [
+                'model' => "models/{$model}",
+                'content' => [
+                    'parts' => [['text' => $text]],
+                ],
+            ];
+        }
+
+        $response = $this->embeddingRequest(['requests' => $requests], $url);
+
+        $embeddings = [];
+        foreach ($response['embeddings'] as $embedding) {
+            $embeddings[] = $embedding['values'];
+        }
+
+        return new EmbeddingResponse(
+            embeddings: $embeddings,
+            model: $model,
+        );
     }
 
     /**
@@ -588,6 +645,42 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface
      * Make an API request.
      */
     protected function request(string $url, array $payload): array
+    {
+        $ch = curl_init($url);
+
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode($payload),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/json',
+            ],
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+
+        curl_close($ch);
+
+        if ($error !== '') {
+            throw new RuntimeException("Google API request failed: {$error}");
+        }
+
+        $data = json_decode($response, true);
+
+        if ($httpCode >= 400) {
+            $errorMessage = $data['error']['message'] ?? 'Unknown error';
+            throw new RuntimeException("Google API error ({$httpCode}): {$errorMessage}");
+        }
+
+        return $data;
+    }
+
+    /**
+     * Make an embedding API request.
+     */
+    protected function embeddingRequest(array $payload, string $url): array
     {
         $ch = curl_init($url);
 
