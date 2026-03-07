@@ -40,7 +40,7 @@ use RuntimeException;
  * - gemini-1.5-pro (proven quality)
  * - gemini-1.5-flash (fast, cost-effective)
  */
-final class GoogleProvider implements ProviderInterface, ImageProviderInterface
+class GoogleProvider implements ProviderInterface, ImageProviderInterface
 {
     private const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -69,7 +69,8 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
         private readonly string $apiKey,
         private readonly string $defaultModel = self::MODEL_3_0_PRO,
         private readonly int $defaultMaxTokens = 8192,
-    ) {}
+    ) {
+    }
 
     public function chat(array $messages, array $options = []): Response
     {
@@ -137,14 +138,9 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
      *     model?: string,
      *     numberOfImages?: int,
      *     aspectRatio?: string,
-     *     negativePrompt?: string,
+     *     imageSize?: int,
      * } $options Generation options
-     * @return array{
-     *     images: array<array{
-     *         mimeType: string,
-     *         data: string,
-     *     }>,
-     * }
+     * @return array{images: array<array{mimeType: string, data: string}>}
      */
     public function generateImage(string $prompt, array $options = []): array
     {
@@ -205,7 +201,7 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
      * @param array{
      *     model?: string,
      *     aspectRatio?: string,
-     *     imageSize?: string,
+     *     imageSize?: int,
      * } $options Edit options
      * @return array{images: array<array{mimeType: string, data: string}>, text: string}
      */
@@ -290,7 +286,7 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
     /**
      * Fetch an image from URL with proper headers.
      */
-    private function fetchImage(string $url): string|false
+    protected function fetchImage(string $url): string|false
     {
         $context = stream_context_create([
             'http' => [
@@ -591,7 +587,7 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
     /**
      * Make an API request.
      */
-    private function request(string $url, array $payload): array
+    protected function request(string $url, array $payload): array
     {
         $ch = curl_init($url);
 
@@ -629,7 +625,7 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
      *
      * @return Generator<array>
      */
-    private function streamRequest(string $url, array $payload): Generator
+    protected function streamRequest(string $url, array $payload): Generator
     {
         $ch = curl_init($url);
 
@@ -642,6 +638,7 @@ final class GoogleProvider implements ProviderInterface, ImageProviderInterface
             ],
             CURLOPT_WRITEFUNCTION => function ($ch, $data) use (&$buffer) {
                 $buffer .= $data;
+
                 return strlen($data);
             },
         ]);
