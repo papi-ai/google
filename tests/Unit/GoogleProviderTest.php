@@ -64,6 +64,11 @@ class TestableGoogleProvider extends GoogleProvider
     {
         return $this->fakeImageData;
     }
+
+    public function callThrowForStatusCode(int $httpCode, ?array $data): never
+    {
+        $this->throwForStatusCode($httpCode, $data);
+    }
 }
 
 describe('GoogleProvider', function () {
@@ -658,6 +663,28 @@ describe('GoogleProvider', function () {
             expect($response->first())->toBe([0.1, 0.2, 0.3, 0.4]);
             expect($response->dimensions())->toBe(4);
             expect($response->count())->toBe(1);
+        });
+    });
+
+    describe('error mapping', function () {
+        it('throws AuthenticationException for 401', function () {
+            expect(fn () => $this->provider->callThrowForStatusCode(401, ['error' => ['message' => 'Invalid API key']]))
+                ->toThrow(PapiAI\Core\Exception\AuthenticationException::class);
+        });
+
+        it('throws RateLimitException for 429', function () {
+            expect(fn () => $this->provider->callThrowForStatusCode(429, ['error' => ['message' => 'Rate limit exceeded']]))
+                ->toThrow(PapiAI\Core\Exception\RateLimitException::class);
+        });
+
+        it('throws ProviderException for 500', function () {
+            expect(fn () => $this->provider->callThrowForStatusCode(500, ['error' => ['message' => 'Internal server error']]))
+                ->toThrow(PapiAI\Core\Exception\ProviderException::class);
+        });
+
+        it('throws ProviderException when data is null', function () {
+            expect(fn () => $this->provider->callThrowForStatusCode(500, null))
+                ->toThrow(PapiAI\Core\Exception\ProviderException::class);
         });
     });
 
