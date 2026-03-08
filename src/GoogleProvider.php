@@ -30,24 +30,33 @@ use PapiAI\Core\ToolCall;
 use RuntimeException;
 
 /**
- * Google Gemini API Provider.
+ * Google Gemini API provider for PapiAI.
  *
- * Supports Gemini models including:
+ * Bridges PapiAI's core types (Message, Response, ToolCall) with Google's Generative Language
+ * API, handling format conversion in both directions. Supports chat completions, streaming,
+ * tool calling with thought signatures, vision (multimodal), structured JSON output, image
+ * generation/editing via Imagen, and text embeddings.
+ *
+ * Authentication is via API key passed as a query parameter. All HTTP is done with ext-curl
+ * directly, with no HTTP abstraction layer.
+ *
+ * Supported model families:
  *
  * Gemini 3.x (Latest):
- * - gemini-3.1-pro (newest, best quality)
- * - gemini-3.0-pro (excellent quality)
+ *   - gemini-3.1-pro, gemini-3.0-pro, gemini-3-flash, gemini-3-pro-image
  *
  * Gemini 2.x:
- * - gemini-2.5-pro (best quality)
- * - gemini-2.5-flash (fast, balanced)
- * - gemini-2.5-flash-lite (fastest, most cost-effective)
- * - gemini-2.0-flash (fast, multimodal)
- * - gemini-2.0-flash-lite (lightweight)
+ *   - gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite
+ *   - gemini-2.0-flash, gemini-2.0-flash-lite
  *
  * Gemini 1.5:
- * - gemini-1.5-pro (proven quality)
- * - gemini-1.5-flash (fast, cost-effective)
+ *   - gemini-1.5-pro, gemini-1.5-flash
+ *
+ * Imagen (image generation):
+ *   - imagen-4.0-generate-001, imagen-4.0-ultra-generate-001
+ *   - imagen-4.0-fast-generate-001, imagen-3.0-capability-001
+ *
+ * @see https://ai.google.dev/gemini-api/docs
  */
 class GoogleProvider implements ProviderInterface, ImageProviderInterface, EmbeddingProviderInterface
 {
@@ -72,9 +81,16 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     public const IMAGEN_4_FAST = 'imagen-4.0-fast-generate-001';
     public const IMAGEN_EDIT = 'imagen-3.0-capability-001';
 
-    /** @var array<string, string> tool call ID → thought signature */
+    /** @var array<string, string> tool call ID to thought signature mapping for multi-turn tool use */
     private array $thoughtSignatures = [];
 
+    /**
+     * Create a new Google Gemini provider instance.
+     *
+     * @param string $apiKey         Google AI API key for authentication
+     * @param string $defaultModel   Gemini model to use when not specified in options
+     * @param int    $defaultMaxTokens Maximum output tokens when not specified in options
+     */
     public function __construct(
         private readonly string $apiKey,
         private readonly string $defaultModel = self::MODEL_3_0_PRO,
@@ -82,6 +98,30 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     ) {
     }
 
+    /**
+     * Send a chat completion request to the Gemini API.
+     *
+     * Converts PapiAI Messages to Gemini's content format, sends the request,
+     * and parses the response back into a core Response object. Supports tools,
+     * vision, structured output, and custom generation parameters.
+     *
+     * @param array<Message> $messages Conversation history as PapiAI Message objects
+     * @param array{
+     *     model?: string,
+     *     tools?: array,
+     *     maxTokens?: int,
+     *     temperature?: float,
+     *     stopSequences?: array<string>,
+     *     outputSchema?: array,
+     * } $options Request options (model, tools, maxTokens, temperature, etc.)
+     *
+     * @return Response Parsed response containing text, tool calls, usage, and stop reason
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails
+     */
     public function chat(array $messages, array $options = []): Response
     {
         $model = $options['model'] ?? $this->defaultModel;
@@ -93,6 +133,27 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         return $this->parseResponse($response, $messages);
     }
 
+    /**
+     * Stream a chat completion from the Gemini API using server-sent events.
+     *
+     * Yields StreamChunk objects as partial responses arrive. The final chunk
+     * has isComplete=true. Only text content is streamed; tool calls are not
+     * supported in streaming mode.
+     *
+     * @param array<Message> $messages Conversation history as PapiAI Message objects
+     * @param array{
+     *     model?: string,
+     *     tools?: array,
+     *     maxTokens?: int,
+     *     temperature?: float,
+     *     stopSequences?: array<string>,
+     *     outputSchema?: array,
+     * } $options Request options (model, tools, maxTokens, temperature, etc.)
+     *
+     * @return iterable<StreamChunk> Stream of text chunks, ending with a completion marker
+     *
+     * @throws RuntimeException When the cURL request fails
+     */
     public function stream(array $messages, array $options = []): iterable
     {
         $model = $options['model'] ?? $this->defaultModel;
@@ -110,47 +171,100 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         yield new StreamChunk('', isComplete: true);
     }
 
+    /**
+     * Whether this provider supports function/tool calling.
+     *
+     * Gemini supports tool calling with function declarations and thought signatures
+     * for multi-turn tool use conversations.
+     *
+     * @return bool Always true for Google Gemini
+     */
     public function supportsTool(): bool
     {
         return true;
     }
 
+    /**
+     * Whether this provider supports vision (image inputs in messages).
+     *
+     * Gemini natively handles images via inlineData (base64) and fileData (URLs).
+     *
+     * @return bool Always true for Google Gemini
+     */
     public function supportsVision(): bool
     {
         return true;
     }
 
+    /**
+     * Whether this provider supports structured JSON output with a schema.
+     *
+     * Gemini supports JSON mode via responseMimeType and responseSchema in generation config.
+     *
+     * @return bool Always true for Google Gemini
+     */
     public function supportsStructuredOutput(): bool
     {
         return true; // Gemini supports JSON mode
     }
 
+    /**
+     * Get the unique identifier for this provider.
+     *
+     * Used for error reporting and provider selection in multi-provider setups.
+     *
+     * @return string The provider name "google"
+     */
     public function getName(): string
     {
         return 'google';
     }
 
+    /**
+     * Whether this provider supports image generation from text prompts.
+     *
+     * Supported via Google's Imagen 4 model family through the predict endpoint.
+     *
+     * @return bool Always true for Google
+     */
     public function supportsImageGeneration(): bool
     {
         return true;
     }
 
+    /**
+     * Whether this provider supports AI-powered image editing.
+     *
+     * Supported via Gemini's multimodal models (e.g., gemini-3-pro-image) which
+     * can accept an image + text prompt and return a modified image.
+     *
+     * @return bool Always true for Google
+     */
     public function supportsImageEditing(): bool
     {
         return true;
     }
 
     /**
-     * Generate an image using Google's Imagen 4 API.
+     * Generate images from a text prompt using Google's Imagen 4 API.
      *
-     * @param string $prompt The image generation prompt
+     * Sends the prompt to the Imagen predict endpoint and parses the response,
+     * handling both the "predictions" and "generatedImages" response formats.
+     *
+     * @param string $prompt Descriptive text prompt for image generation
      * @param array{
      *     model?: string,
      *     numberOfImages?: int,
      *     aspectRatio?: string,
      *     imageSize?: int,
-     * } $options Generation options
-     * @return array{images: array<array{mimeType: string, data: string}>}
+     * } $options Generation options (defaults: model=imagen-4.0-fast, 1 image, 1:1 ratio)
+     *
+     * @return array{images: array<array{mimeType: string, data: string}>} Base64-encoded images with MIME types
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails
      */
     public function generateImage(string $prompt, array $options = []): array
     {
@@ -201,19 +315,27 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Edit an existing image using AI.
+     * Edit an existing image using Gemini's multimodal generation.
      *
-     * Uses Gemini's image generation models to edit/enhance images.
-     * Supports multi-turn editing via thoughtSignature preservation.
+     * Fetches the source image, encodes it as base64 inline data, and sends it
+     * alongside the edit prompt to a Gemini image model. The response may contain
+     * both modified images and descriptive text. Intermediate "thought" images from
+     * the model's reasoning process are filtered out.
      *
-     * @param string $imageUrl URL of the source image to edit
-     * @param string $prompt Instructions for how to edit the image
+     * @param string $imageUrl URL of the source image to fetch and edit
+     * @param string $prompt   Natural language instructions for how to modify the image
      * @param array{
      *     model?: string,
      *     aspectRatio?: string,
      *     imageSize?: int,
-     * } $options Edit options
-     * @return array{images: array<array{mimeType: string, data: string}>, text: string}
+     * } $options Edit options (defaults: model=gemini-3-pro-image, 1:1 ratio, 2K size)
+     *
+     * @return array{images: array<array{mimeType: string, data: string}>, text: string} Edited images and any descriptive text
+     *
+     * @throws RuntimeException        When the source image cannot be fetched
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
      */
     public function editImage(string $imageUrl, string $prompt, array $options = []): array
     {
@@ -260,13 +382,24 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Generate embeddings for the given input(s).
+     * Generate text embeddings using Google's embedding models.
      *
-     * @param string|array<string> $input One or more texts to embed
+     * For a single input, uses the embedContent endpoint. For multiple inputs,
+     * uses batchEmbedContents for efficiency. Returns float vectors suitable
+     * for similarity search, clustering, and classification tasks.
+     *
+     * @param string|array<string> $input One or more texts to generate embeddings for
      * @param array{
      *     model?: string,
      *     dimensions?: int,
-     * } $options Provider-specific options
+     * } $options Provider-specific options (defaults: model=text-embedding-004)
+     *
+     * @return EmbeddingResponse Embedding vectors and model metadata
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails
      */
     public function embed(string|array $input, array $options = []): EmbeddingResponse
     {
@@ -315,12 +448,15 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Parse an image generation/editing response.
+     * Parse a Gemini image generation/editing response into a normalized format.
      *
-     * Handles Gemini's thought process: parts with "thought": true are
-     * intermediate reasoning images. The final output has "thoughtSignature".
+     * Filters out intermediate "thought" images (parts with thought=true) that
+     * represent the model's internal reasoning, keeping only final output images
+     * and any accompanying text.
      *
-     * @return array{images: array<array{mimeType: string, data: string}>, text: string}
+     * @param array $response Raw decoded JSON response from the Gemini API
+     *
+     * @return array{images: array<array{mimeType: string, data: string}>, text: string} Extracted images and text
      */
     private function parseImageResponse(array $response): array
     {
@@ -349,7 +485,14 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Fetch an image from URL with proper headers.
+     * Fetch an image from a URL with browser-like headers to avoid blocking.
+     *
+     * Uses file_get_contents with a custom stream context that mimics a real
+     * browser request. SSL verification is disabled to handle self-signed certs.
+     *
+     * @param string $url The image URL to fetch
+     *
+     * @return string|false Raw image binary data, or false on failure
      */
     protected function fetchImage(string $url): string|false
     {
@@ -372,7 +515,15 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Detect MIME type from URL or content.
+     * Detect the MIME type of an image from its URL file extension.
+     *
+     * Falls back to image/jpeg for unrecognized extensions, which covers
+     * most web images. Supports JPEG, PNG, GIF, and WebP.
+     *
+     * @param string $url  The image URL to extract the extension from
+     * @param string $data Raw image data (reserved for future content-based detection)
+     *
+     * @return string The detected MIME type (e.g., "image/png")
      */
     private function detectMimeType(string $url, string $data): string
     {
@@ -388,12 +539,27 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Generate an image and save it to a file.
+     * Generate an image and save it directly to a file on disk.
      *
-     * @param string $prompt The image generation prompt
-     * @param string $outputPath Path to save the image
-     * @param array $options Generation options
-     * @return string The path to the saved image
+     * Convenience method that calls generateImage() and writes the first
+     * resulting image to the specified path. Useful for CLI tools and
+     * batch processing where you want the image on disk immediately.
+     *
+     * @param string $prompt     Descriptive text prompt for image generation
+     * @param string $outputPath Filesystem path where the image will be saved
+     * @param array{
+     *     model?: string,
+     *     numberOfImages?: int,
+     *     aspectRatio?: string,
+     *     imageSize?: int,
+     * } $options Generation options passed through to generateImage()
+     *
+     * @return string The output path where the image was saved
+     *
+     * @throws RuntimeException        When no images are generated, decoding fails, or file write fails
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
      */
     public function generateImageToFile(string $prompt, string $outputPath, array $options = []): string
     {
@@ -420,7 +586,23 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Build the API request payload.
+     * Build the Gemini API request payload from messages and options.
+     *
+     * Converts the PapiAI message array into Gemini's contents format, extracts
+     * system instructions into a separate field, and applies generation config
+     * options (maxTokens, temperature, stop sequences, JSON schema, tools).
+     *
+     * @param array<Message> $messages Conversation messages to convert
+     * @param array{
+     *     model?: string,
+     *     tools?: array,
+     *     maxTokens?: int,
+     *     temperature?: float,
+     *     stopSequences?: array<string>,
+     *     outputSchema?: array,
+     * } $options Request options controlling generation behavior
+     *
+     * @return array The complete Gemini API payload ready for JSON encoding
      */
     private function buildPayload(array $messages, array $options): array
     {
@@ -476,7 +658,16 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Convert a Message to Gemini API format.
+     * Convert a single PapiAI Message into Gemini's content format.
+     *
+     * Handles all message types: tool responses (functionResponse), assistant
+     * messages with tool calls (functionCall with optional thoughtSignature),
+     * multimodal content (images + text), and plain text messages. Maps PapiAI
+     * roles to Gemini roles (User/Tool become "user", Assistant becomes "model").
+     *
+     * @param Message $message The PapiAI message to convert
+     *
+     * @return array Gemini content object with "role" and "parts" keys
      */
     private function convertMessage(Message $message): array
     {
@@ -528,7 +719,14 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Convert multimodal content to Gemini format.
+     * Convert multimodal content parts (text + images) to Gemini format.
+     *
+     * Translates PapiAI's content array format into Gemini's parts format.
+     * Images are converted to either fileData (for URLs) or inlineData (for base64).
+     *
+     * @param array<array{type: string, text?: string, source?: array}> $content Multimodal content parts
+     *
+     * @return array<array> Gemini-formatted parts array
      */
     private function convertMultimodalContent(array $content): array
     {
@@ -563,7 +761,15 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Convert tools from PapiAI format to Gemini format.
+     * Convert PapiAI tool definitions to Gemini's functionDeclarations format.
+     *
+     * Maps each tool's name, description, and input schema (JSON Schema) into
+     * the structure expected by Gemini's tools API. Only array-format tools
+     * are supported; object-format tools are skipped.
+     *
+     * @param array<array{name: string, description: string, input_schema?: array, parameters?: array}> $tools PapiAI tool definitions
+     *
+     * @return array<array{name: string, description: string, parameters: array}> Gemini function declarations
      */
     private function convertTools(array $tools): array
     {
@@ -584,7 +790,17 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Parse API response into Response object.
+     * Parse a Gemini API response into a PapiAI Response object.
+     *
+     * Extracts text content, function calls (with thought signatures for multi-turn),
+     * token usage metadata, and the finish reason from the first candidate. Tool call
+     * thought signatures are cached in $this->thoughtSignatures so they can be
+     * re-attached when converting the assistant's tool call message back to Gemini format.
+     *
+     * @param array          $response Raw decoded JSON response from the Gemini API
+     * @param array<Message> $messages Original conversation messages (passed through to Response)
+     *
+     * @return Response Parsed response with text, tool calls, usage stats, and stop reason
      */
     private function parseResponse(array $response, array $messages): Response
     {
@@ -632,7 +848,14 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Extract text from a streaming candidate response.
+     * Extract concatenated text from a single streaming SSE event.
+     *
+     * Iterates through all parts of the first candidate and concatenates any
+     * text parts. Non-text parts (e.g., function calls) are ignored during streaming.
+     *
+     * @param array $event A single decoded SSE event from the streaming response
+     *
+     * @return string The extracted text, or empty string if no text parts exist
      */
     private function extractTextFromCandidate(array $event): string
     {
@@ -650,7 +873,21 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Make an API request.
+     * Send a synchronous POST request to the Gemini API via cURL.
+     *
+     * Encodes the payload as JSON, sends it to the given URL, and decodes the
+     * JSON response. Delegates error handling to throwForStatusCode() for any
+     * HTTP 4xx/5xx responses. Protected to allow test doubles to intercept requests.
+     *
+     * @param string $url     Full API endpoint URL including query parameters
+     * @param array  $payload Request body to be JSON-encoded
+     *
+     * @return array Decoded JSON response body
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails (network error, timeout, etc.)
      */
     protected function request(string $url, array $payload): array
     {
@@ -685,7 +922,21 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Make an embedding API request.
+     * Send a synchronous POST request to the Gemini embedding API via cURL.
+     *
+     * Functionally identical to request() but kept separate so test doubles
+     * can independently stub embedding vs. generation endpoints. Protected
+     * to allow test subclasses to override.
+     *
+     * @param array  $payload Request body to be JSON-encoded
+     * @param string $url     Full embedding API endpoint URL including query parameters
+     *
+     * @return array Decoded JSON response body containing embedding vectors
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails (network error, timeout, etc.)
      */
     protected function embeddingRequest(array $payload, string $url): array
     {
@@ -720,11 +971,18 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Throw the appropriate exception based on HTTP status code.
+     * Map an HTTP error status code to the appropriate PapiAI exception.
      *
-     * @throws AuthenticationException
-     * @throws RateLimitException
-     * @throws ProviderException
+     * Translates Google API errors into PapiAI's exception hierarchy so callers
+     * can handle authentication failures, rate limits, and general errors uniformly
+     * across all providers. This method never returns (marked as `never`).
+     *
+     * @param int        $httpCode HTTP status code (4xx or 5xx)
+     * @param array|null $data     Decoded JSON error response body (may be null if response was not valid JSON)
+     *
+     * @throws AuthenticationException When the API key is invalid or missing (HTTP 401)
+     * @throws RateLimitException      When quota or rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       For all other API errors (HTTP 4xx/5xx)
      */
     protected function throwForStatusCode(int $httpCode, ?array $data): never
     {
@@ -755,9 +1013,16 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Make a streaming API request.
+     * Send a streaming POST request and yield parsed SSE events.
      *
-     * @return Generator<array>
+     * Buffers the entire SSE response (Gemini streams via `alt=sse` query param),
+     * then parses each `data:` line as JSON and yields the decoded events. Protected
+     * to allow test doubles to provide pre-built event sequences.
+     *
+     * @param string $url     Full API endpoint URL with alt=sse for streaming
+     * @param array  $payload Request body to be JSON-encoded
+     *
+     * @return Generator<int, array> Yields decoded JSON objects, one per SSE data line
      */
     protected function streamRequest(string $url, array $payload): Generator
     {
