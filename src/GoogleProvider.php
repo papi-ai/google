@@ -141,14 +141,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      * supported in streaming mode.
      *
      * @param array<Message> $messages Conversation history as PapiAI Message objects
-     * @param array{
-     *     model?: string,
-     *     tools?: array,
-     *     maxTokens?: int,
-     *     temperature?: float,
-     *     stopSequences?: array<string>,
-     *     outputSchema?: array,
-     * } $options Request options (model, tools, maxTokens, temperature, etc.)
+     * @param array<array-key, mixed> $options Request options (model, tools, maxTokens, temperature, etc.)
      *
      * @return iterable<StreamChunk> Stream of text chunks, ending with a completion marker
      *
