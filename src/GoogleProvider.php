@@ -18,15 +18,18 @@ use Generator;
 use PapiAI\Core\Contracts\EmbeddingProviderInterface;
 use PapiAI\Core\Contracts\ImageProviderInterface;
 use PapiAI\Core\Contracts\ProviderInterface;
+use PapiAI\Core\Contracts\VideoProviderInterface;
 use PapiAI\Core\EmbeddingResponse;
 use PapiAI\Core\Exception\AuthenticationException;
 use PapiAI\Core\Exception\ProviderException;
 use PapiAI\Core\Exception\RateLimitException;
+use PapiAI\Core\JobStatus;
 use PapiAI\Core\Message;
 use PapiAI\Core\Response;
 use PapiAI\Core\Role;
 use PapiAI\Core\StreamChunk;
 use PapiAI\Core\ToolCall;
+use PapiAI\Core\VideoResponse;
 use RuntimeException;
 
 /**
@@ -58,9 +61,10 @@ use RuntimeException;
  *
  * @see https://ai.google.dev/gemini-api/docs
  */
-class GoogleProvider implements ProviderInterface, ImageProviderInterface, EmbeddingProviderInterface
+class GoogleProvider implements ProviderInterface, ImageProviderInterface, EmbeddingProviderInterface, VideoProviderInterface
 {
-    private const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+    private const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta';
+    private const API_BASE = self::API_ROOT . '/models';
 
     // Gemini model aliases
     public const MODEL_3_1_PRO = 'gemini-3.1-pro-preview';
@@ -80,6 +84,11 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     public const IMAGEN_4_ULTRA = 'imagen-4.0-ultra-generate-001';
     public const IMAGEN_4_FAST = 'imagen-4.0-fast-generate-001';
     public const IMAGEN_EDIT = 'imagen-3.0-capability-001';
+
+    // Veo model aliases for video generation
+    public const MODEL_VEO_3_1 = 'veo-3.1-generate-preview';
+    public const MODEL_VEO_3 = 'veo-3.0-generate-001';
+    public const MODEL_VEO_2 = 'veo-2.0-generate-001';
 
     /** @var array<string, string> tool call ID to thought signature mapping for multi-turn tool use */
     private array $thoughtSignatures = [];
@@ -372,6 +381,367 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         $response = $this->request($url, $payload);
 
         return $this->parseImageResponse($response);
+    }
+
+    /**
+     * Whether this provider supports video generation from text prompts.
+     *
+     * Supported via Google's Veo model family through the predictLongRunning endpoint.
+     *
+     * @return bool Always true for Google
+     */
+    public function supportsVideoGeneration(): bool
+    {
+        return true;
+    }
+
+    /**
+     * Generate a video from a text prompt using Google's Veo API, blocking until ready.
+     *
+     * Submits the request, then polls the long-running operation with exponential backoff
+     * (1s doubling up to 10s) until Veo finishes, and returns the finished clip.
+     *
+     * @param string $prompt Descriptive text prompt for video generation
+     * @param array{
+     *     model?: string,
+     *     aspectRatio?: string,
+     *     durationSeconds?: int,
+     *     resolution?: string,
+     *     fps?: int,
+     *     image?: string,
+     *     imageMimeType?: string,
+     *     negativePrompt?: string,
+     *     pollTimeoutSeconds?: int,
+     * } $options Generation options (image = base64 seed for image-to-video)
+     *
+     * @return VideoResponse The generated video (bytes downloaded when a URI is returned)
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When generation fails or times out
+     * @throws RuntimeException        When a cURL request itself fails
+     */
+    public function generateVideo(string $prompt, array $options = []): VideoResponse
+    {
+        $jobId = $this->startVideo($prompt, $options);
+        $timeoutSeconds = $options['pollTimeoutSeconds'] ?? 300;
+        $delaySeconds = 1;
+        $waited = 0;
+
+        while (true) {
+            $status = $this->videoStatus($jobId);
+
+            if ($status->isCompleted()) {
+                return $this->fetchVideo($jobId);
+            }
+
+            if ($status->isFailed()) {
+                throw new ProviderException(
+                    sprintf('Veo video generation failed: %s.', $status->error ?? 'unknown error'),
+                    $this->getName(),
+                );
+            }
+
+            if ($waited >= $timeoutSeconds) {
+                throw new ProviderException(
+                    sprintf('Veo video generation timed out after %d seconds.', $timeoutSeconds),
+                    $this->getName(),
+                );
+            }
+
+            $this->pause($delaySeconds);
+            $waited += $delaySeconds;
+            $delaySeconds = min($delaySeconds * 2, 10);
+        }
+    }
+
+    /**
+     * Submit a Veo video generation request and return the operation name immediately.
+     *
+     * @param string $prompt  Descriptive text prompt for video generation
+     * @param array  $options Generation options (see generateVideo())
+     *
+     * @return string The long-running operation name, used as the job identifier
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns an error or no operation name
+     * @throws RuntimeException        When the cURL request itself fails
+     */
+    public function startVideo(string $prompt, array $options = []): string
+    {
+        $model = $options['model'] ?? self::MODEL_VEO_3;
+        $payload = $this->buildVideoPayload($prompt, $options);
+
+        $url = self::API_BASE . "/{$model}:predictLongRunning?key={$this->apiKey}";
+        $response = $this->request($url, $payload);
+
+        $name = $response['name'] ?? '';
+
+        if ($name === '') {
+            throw new ProviderException('Veo did not return an operation name.', $this->getName());
+        }
+
+        return $name;
+    }
+
+    /**
+     * Poll the status of a submitted Veo video generation job.
+     *
+     * @param string $jobId The operation name returned by startVideo()
+     *
+     * @return JobStatus Current status (running until Veo reports done, then completed/failed)
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error
+     * @throws RuntimeException        When the cURL request itself fails
+     */
+    public function videoStatus(string $jobId): JobStatus
+    {
+        $operation = $this->getRequest($this->operationUrl($jobId));
+
+        if (isset($operation['error'])) {
+            return new JobStatus($jobId, JobStatus::FAILED, null, $operation['error']['message'] ?? 'unknown error');
+        }
+
+        if (($operation['done'] ?? false) === true) {
+            return new JobStatus($jobId, JobStatus::COMPLETED);
+        }
+
+        return new JobStatus($jobId, JobStatus::RUNNING);
+    }
+
+    /**
+     * Retrieve the finished video for a completed Veo job.
+     *
+     * @param string $jobId The operation name returned by startVideo()
+     *
+     * @return VideoResponse The generated video (bytes downloaded when a URI is returned)
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the job is unfinished, failed, or returned no video
+     * @throws RuntimeException        When the cURL request itself fails
+     */
+    public function fetchVideo(string $jobId): VideoResponse
+    {
+        $operation = $this->getRequest($this->operationUrl($jobId));
+
+        if (isset($operation['error'])) {
+            throw new ProviderException(
+                sprintf('Veo video generation failed: %s.', $operation['error']['message'] ?? 'unknown error'),
+                $this->getName(),
+            );
+        }
+
+        if (($operation['done'] ?? false) !== true) {
+            throw new ProviderException(
+                sprintf('Video job "%s" is not complete yet.', $jobId),
+                $this->getName(),
+            );
+        }
+
+        return $this->parseVideoResponse($operation, $jobId);
+    }
+
+    /**
+     * Build the predictLongRunning request body for a Veo generation.
+     *
+     * @param string $prompt  The generation prompt
+     * @param array  $options Generation options (see generateVideo())
+     *
+     * @return array The instances/parameters payload
+     */
+    private function buildVideoPayload(string $prompt, array $options): array
+    {
+        $instance = ['prompt' => $prompt];
+
+        if (isset($options['image'])) {
+            $instance['image'] = [
+                'bytesBase64Encoded' => $options['image'],
+                'mimeType' => $options['imageMimeType'] ?? 'image/png',
+            ];
+        }
+
+        $parameters = [];
+        foreach (['aspectRatio', 'durationSeconds', 'negativePrompt', 'fps', 'resolution'] as $key) {
+            if (isset($options[$key])) {
+                $parameters[$key] = $options[$key];
+            }
+        }
+
+        $payload = ['instances' => [$instance]];
+
+        if ($parameters !== []) {
+            $payload['parameters'] = $parameters;
+        }
+
+        return $payload;
+    }
+
+    /**
+     * Extract a VideoResponse from a completed operation payload.
+     *
+     * Handles the several response shapes Veo has used: inline base64 bytes, a
+     * download URI, or a Cloud Storage URI. When only a URI is present the bytes
+     * are downloaded so callers receive a usable clip.
+     *
+     * @param array  $operation The completed long-running operation payload
+     * @param string $jobId     The operation name (used to infer the model)
+     *
+     * @return VideoResponse The generated video
+     *
+     * @throws ProviderException When the payload contains no video
+     */
+    private function parseVideoResponse(array $operation, string $jobId): VideoResponse
+    {
+        $model = $this->videoModelFromOperation($jobId);
+        $samples = $operation['response']['generateVideoResponse']['generatedSamples']
+            ?? $operation['response']['generateVideoResponse']['generatedVideos']
+            ?? $operation['response']['videos']
+            ?? [];
+
+        foreach ($samples as $sample) {
+            $video = $sample['video'] ?? $sample;
+
+            if (isset($video['bytesBase64Encoded'])) {
+                $bytes = base64_decode($video['bytesBase64Encoded'], true);
+
+                if ($bytes !== false) {
+                    return new VideoResponse($bytes, null, $video['mimeType'] ?? 'video/mp4', $model);
+                }
+            }
+
+            $uri = $video['uri'] ?? $video['gcsUri'] ?? null;
+
+            if ($uri !== null) {
+                $bytes = $this->downloadVideo($uri);
+
+                if ($bytes !== false) {
+                    return new VideoResponse($bytes, $uri, 'video/mp4', $model);
+                }
+
+                return VideoResponse::fromUri($uri, $model);
+            }
+        }
+
+        throw new ProviderException(
+            sprintf('Veo returned no video for job "%s".', $jobId),
+            $this->getName(),
+        );
+    }
+
+    /**
+     * Infer the Veo model id from an operation name of the form models/{model}/operations/{id}.
+     *
+     * @param string $jobId The operation name
+     *
+     * @return string The model id, or an empty string when it cannot be determined
+     */
+    private function videoModelFromOperation(string $jobId): string
+    {
+        if (preg_match('#models/([^/]+)/#', $jobId, $matches) === 1) {
+            return $matches[1];
+        }
+
+        return '';
+    }
+
+    /**
+     * Build the poll URL for a long-running operation name.
+     */
+    private function operationUrl(string $jobId): string
+    {
+        return self::API_ROOT . '/' . ltrim($jobId, '/') . "?key={$this->apiKey}";
+    }
+
+    /**
+     * Pause between poll attempts. Isolated so tests can override it to no-op.
+     *
+     * @param int $seconds Seconds to sleep
+     */
+    protected function pause(int $seconds): void
+    {
+        sleep($seconds);
+    }
+
+    /**
+     * Send a synchronous GET request to the Gemini API via cURL.
+     *
+     * Used to poll long-running operations. Protected so test doubles can stub it.
+     *
+     * @param string $url Full API endpoint URL including query parameters
+     *
+     * @return array Decoded JSON response body
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails
+     */
+    protected function getRequest(string $url): array
+    {
+        $ch = curl_init($url);
+
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/json',
+            ],
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+
+        curl_close($ch);
+
+        if ($error !== '') {
+            throw new RuntimeException("Google API request failed: {$error}");
+        }
+
+        $data = json_decode($response, true);
+
+        if ($httpCode >= 400) {
+            $this->throwForStatusCode($httpCode, $data);
+        }
+
+        return $data;
+    }
+
+    /**
+     * Download the generated video bytes from a Veo file URI.
+     *
+     * The Gemini file URI requires the API key. Protected so test doubles can stub it.
+     *
+     * @param string $uri The video file URI returned by the operation
+     *
+     * @return string|false Raw video bytes, or false when the download fails
+     */
+    protected function downloadVideo(string $uri): string|false
+    {
+        $separator = str_contains($uri, '?') ? '&' : '?';
+        $url = $uri . $separator . 'key=' . $this->apiKey;
+
+        $ch = curl_init($url);
+
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+        ]);
+
+        $data = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+
+        curl_close($ch);
+
+        if ($error !== '' || $httpCode >= 400 || !is_string($data)) {
+            return false;
+        }
+
+        return $data;
     }
 
     /**
