@@ -379,10 +379,12 @@ describe('GoogleProvider', function () {
 
             $response = $this->provider->chat([Message::user('Hello')]);
 
-            expect($response->usage)->toBe([
+            expect($response->usage->toArray())->toBe([
                 'input_tokens' => 42,
                 'output_tokens' => 15,
             ]);
+            expect($response->getInputTokens())->toBe(42);
+            expect($response->getOutputTokens())->toBe(15);
         });
 
         it('handles structured output options', function () {
