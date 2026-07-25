@@ -29,6 +29,7 @@ use PapiAI\Core\Response;
 use PapiAI\Core\Role;
 use PapiAI\Core\StreamChunk;
 use PapiAI\Core\ToolCall;
+use PapiAI\Core\ToolChoice;
 use PapiAI\Core\VideoResponse;
 use RuntimeException;
 
@@ -60,6 +61,8 @@ use RuntimeException;
  *   - imagen-4.0-fast-generate-001, imagen-3.0-capability-001
  *
  * @see https://ai.google.dev/gemini-api/docs
+ *
+ * @psalm-import-type ChatOptions from ProviderInterface
  */
 class GoogleProvider implements ProviderInterface, ImageProviderInterface, EmbeddingProviderInterface, VideoProviderInterface
 {
@@ -115,14 +118,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      * vision, structured output, and custom generation parameters.
      *
      * @param array<Message> $messages Conversation history as PapiAI Message objects
-     * @param array{
-     *     model?: string,
-     *     tools?: array,
-     *     maxTokens?: int,
-     *     temperature?: float,
-     *     stopSequences?: array<string>,
-     *     outputSchema?: array,
-     * } $options Request options (model, tools, maxTokens, temperature, etc.)
+     * @param ChatOptions     $options  Request options (model, tools, maxTokens, temperature, toolChoice, etc.)
      *
      * @return Response Parsed response containing text, tool calls, usage, and stop reason
      *
@@ -956,14 +952,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      * options (maxTokens, temperature, stop sequences, JSON schema, tools).
      *
      * @param array<Message> $messages Conversation messages to convert
-     * @param array{
-     *     model?: string,
-     *     tools?: array,
-     *     maxTokens?: int,
-     *     temperature?: float,
-     *     stopSequences?: array<string>,
-     *     outputSchema?: array,
-     * } $options Request options controlling generation behavior
+     * @param ChatOptions $options Request options controlling generation behavior
      *
      * @return array The complete Gemini API payload ready for JSON encoding
      */
@@ -1015,6 +1004,27 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
             $payload['tools'] = [
                 ['functionDeclarations' => $this->convertTools($options['tools'])],
             ];
+        }
+
+        // Handle forced tool choice. Validation lives in core and throws before any HTTP call.
+        if (isset($options['toolChoice'])) {
+            $choice = ToolChoice::fromOption($options['toolChoice'], $options['tools'] ?? []);
+
+            if (!empty($options['tools'])) {
+                $config = [
+                    'mode' => match ($choice->mode) {
+                        ToolChoice::NONE => 'NONE',
+                        ToolChoice::REQUIRED => 'ANY',
+                        default => 'AUTO',
+                    },
+                ];
+
+                if ($choice->toolName !== null) {
+                    $config['allowedFunctionNames'] = [$choice->toolName];
+                }
+
+                $payload['toolConfig'] = ['functionCallingConfig' => $config];
+            }
         }
 
         return $payload;
