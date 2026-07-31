@@ -17,6 +17,7 @@ namespace PapiAI\Google;
 use Generator;
 use PapiAI\Core\Contracts\EmbeddingProviderInterface;
 use PapiAI\Core\Contracts\ImageProviderInterface;
+use PapiAI\Core\Contracts\NamedToolSelectableInterface;
 use PapiAI\Core\Contracts\ProviderInterface;
 use PapiAI\Core\Contracts\VideoProviderInterface;
 use PapiAI\Core\Effort;
@@ -66,7 +67,7 @@ use RuntimeException;
  *
  * @psalm-import-type ChatOptions from ProviderInterface
  */
-class GoogleProvider implements ProviderInterface, ImageProviderInterface, EmbeddingProviderInterface, VideoProviderInterface
+class GoogleProvider implements ProviderInterface, ImageProviderInterface, EmbeddingProviderInterface, VideoProviderInterface, NamedToolSelectableInterface
 {
     private const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta';
     private const API_BASE = self::API_ROOT . '/models';
