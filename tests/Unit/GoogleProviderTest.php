@@ -174,7 +174,7 @@ describe('GoogleProvider', function () {
             $this->provider->chat([Message::user('Hello')]);
 
             expect($this->provider->lastPayload['generationConfig']['maxOutputTokens'])->toBe(8192);
-            expect($this->provider->lastUrl)->toContain('gemini-3-pro-preview');
+            expect($this->provider->lastUrl)->toContain('gemini-3.6-flash');
         });
 
         it('overrides model and options from parameters', function () {

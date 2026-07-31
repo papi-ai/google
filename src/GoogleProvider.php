@@ -17,12 +17,15 @@ namespace PapiAI\Google;
 use Generator;
 use PapiAI\Core\Contracts\EmbeddingProviderInterface;
 use PapiAI\Core\Contracts\ImageProviderInterface;
+use PapiAI\Core\Contracts\NamedToolSelectableInterface;
 use PapiAI\Core\Contracts\ProviderInterface;
 use PapiAI\Core\Contracts\VideoProviderInterface;
+use PapiAI\Core\Effort;
 use PapiAI\Core\EmbeddingResponse;
 use PapiAI\Core\Exception\AuthenticationException;
 use PapiAI\Core\Exception\ProviderException;
 use PapiAI\Core\Exception\RateLimitException;
+use PapiAI\Core\Exception\UnknownEffortException;
 use PapiAI\Core\JobStatus;
 use PapiAI\Core\Message;
 use PapiAI\Core\Response;
@@ -64,13 +67,28 @@ use RuntimeException;
  *
  * @psalm-import-type ChatOptions from ProviderInterface
  */
-class GoogleProvider implements ProviderInterface, ImageProviderInterface, EmbeddingProviderInterface, VideoProviderInterface
+class GoogleProvider implements ProviderInterface, ImageProviderInterface, EmbeddingProviderInterface, VideoProviderInterface, NamedToolSelectableInterface
 {
     private const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta';
     private const API_BASE = self::API_ROOT . '/models';
 
+    /**
+     * Floor for a pre-3 thinking budget. Gemini 2.5 Pro will not go below this and cannot be
+     * switched off at all.
+     */
+    private const MIN_THINKING_BUDGET = 128;
+
+    /**
+     * Ceiling for a pre-3 thinking budget, well under the output ceiling of a large request.
+     */
+    private const MAX_THINKING_BUDGET = 32768;
+
     // Gemini model aliases
+    public const MODEL_3_6_FLASH = 'gemini-3.6-flash';
+    public const MODEL_3_5_FLASH = 'gemini-3.5-flash';
+    public const MODEL_3_5_FLASH_LITE = 'gemini-3.5-flash-lite';
     public const MODEL_3_1_PRO = 'gemini-3.1-pro-preview';
+    /** @deprecated Shut down 9 March 2026; the alias now redirects to gemini-3.1-pro-preview. */
     public const MODEL_3_0_PRO = 'gemini-3-pro-preview';
     public const MODEL_3_FLASH = 'gemini-3-flash-preview';
     public const MODEL_3_PRO_IMAGE = 'gemini-3-pro-image-preview';
@@ -102,11 +120,13 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      * @param string $apiKey         Google AI API key for authentication
      * @param string $defaultModel   Gemini model to use when not specified in options
      * @param int    $defaultMaxTokens Maximum output tokens when not specified in options
+     * @param Effort|null $defaultEffort Thinking effort when none is given per call
      */
     public function __construct(
         private readonly string $apiKey,
-        private readonly string $defaultModel = self::MODEL_3_0_PRO,
+        private readonly string $defaultModel = self::MODEL_3_6_FLASH,
         private readonly int $defaultMaxTokens = 8192,
+        private readonly ?Effort $defaultEffort = null,
     ) {
     }
 
@@ -1027,7 +1047,108 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
             }
         }
 
+        // Reasoning effort maps to thinkingConfig, which has two knobs that must never both be
+        // sent: Gemini 3 and later take a thinking level, earlier models take a token budget.
+        $effort = $this->effortFor($options);
+
+        if ($effort !== null) {
+            $payload['generationConfig']['thinkingConfig'] = $this->thinkingConfigFor(
+                $effort,
+                (string) ($options['model'] ?? $this->defaultModel),
+                (int) $payload['generationConfig']['maxOutputTokens'],
+            );
+        }
+
         return $payload;
+    }
+
+    /**
+     * The effort this request asks for: the per-call option, else the provider default.
+     *
+     * @param array<string, mixed> $options The caller's request options
+     *
+     * @throws UnknownEffortException When the level is not one core defines
+     */
+    private function effortFor(array $options): ?Effort
+    {
+        if (!isset($options['effort'])) {
+            return $this->defaultEffort;
+        }
+
+        $level = (string) $options['effort'];
+
+        return Effort::tryFrom($level) ?? throw new UnknownEffortException($level);
+    }
+
+    /**
+     * Build the thinkingConfig block for a level of effort.
+     *
+     * The two knobs are mutually exclusive and the API errors when both are sent, so exactly one
+     * comes back. Gemini 3 still accepts `thinkingBudget` for backwards compatibility, but Google
+     * warns it behaves unpredictably on Pro, so the level knob is always used there.
+     *
+     * @param Effort $effort    The level the caller asked for
+     * @param string $model     The model this request targets, which decides the knob
+     * @param int    $maxTokens The output ceiling this request will carry
+     *
+     * @return array{thinkingLevel: string}|array{thinkingBudget: int} One knob, never both
+     */
+    private function thinkingConfigFor(Effort $effort, string $model, int $maxTokens): array
+    {
+        if ($this->takesThinkingLevel($model)) {
+            // Lowercase, matching every REST example Google publishes.
+            return ['thinkingLevel' => $effort->nearestOf($this->levelsFor($model))->value];
+        }
+
+        return ['thinkingBudget' => $this->budgetFor($effort, $model, $maxTokens)];
+    }
+
+    /**
+     * The thinking levels a Gemini 3 model accepts.
+     *
+     * **No Gemini 3 model can switch thinking off**, so `Effort::None` narrows to the shallowest
+     * level on offer rather than disabling anything. Pro does not accept MINIMAL at all, so its
+     * floor is LOW.
+     *
+     * @return non-empty-list<Effort>
+     */
+    private function levelsFor(string $model): array
+    {
+        if (stripos($model, 'pro') !== false) {
+            return [Effort::Low, Effort::Medium, Effort::High];
+        }
+
+        return [Effort::Minimal, Effort::Low, Effort::Medium, Effort::High];
+    }
+
+    /**
+     * The thinking budget a pre-3 Gemini model accepts.
+     *
+     * Only the Flash families can genuinely disable thinking with a zero budget. Pro has a floor
+     * it will not go below, and every family has a ceiling well under a large maxTokens, so the
+     * neutral share is clamped into the range Gemini actually accepts.
+     */
+    private function budgetFor(Effort $effort, string $model, int $maxTokens): int
+    {
+        $canDisable = stripos($model, 'flash') !== false;
+
+        if (!$effort->thinks() && $canDisable) {
+            return 0;
+        }
+
+        $budget = max(self::MIN_THINKING_BUDGET, $effort->budgetWithin($maxTokens));
+
+        return min($budget, self::MAX_THINKING_BUDGET);
+    }
+
+    /**
+     * Whether this model wants a thinking level rather than a thinking budget.
+     *
+     * Decided from the model name because the API offers no way to ask.
+     */
+    private function takesThinkingLevel(string $model): bool
+    {
+        return preg_match('/gemini-([3-9]|\d{2,})/i', $model) === 1;
     }
 
     /**
