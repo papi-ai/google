@@ -42,7 +42,7 @@ use RuntimeException;
  * Bridges PapiAI's core types (Message, Response, ToolCall) with Google's Generative Language
  * API, handling format conversion in both directions. Supports chat completions, streaming,
  * tool calling with thought signatures, vision (multimodal), structured JSON output, image
- * generation/editing via Imagen, and text embeddings.
+ * generation and editing, video generation via Veo, and text embeddings.
  *
  * Authentication is via API key passed as a query parameter. All HTTP is done with ext-curl
  * directly, with no HTTP abstraction layer.
@@ -50,18 +50,19 @@ use RuntimeException;
  * Supported model families:
  *
  * Gemini 3.x (Latest):
- *   - gemini-3.1-pro, gemini-3.0-pro, gemini-3-flash, gemini-3-pro-image
+ *   - gemini-3.6-flash, gemini-3.5-flash, gemini-3.5-flash-lite
+ *   - gemini-3.1-pro, gemini-3-flash
  *
  * Gemini 2.x:
  *   - gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite
  *   - gemini-2.0-flash, gemini-2.0-flash-lite
  *
- * Gemini 1.5:
- *   - gemini-1.5-pro, gemini-1.5-flash
+ * Image generation and editing:
+ *   - gemini-3.1-flash-image, gemini-3.1-flash-lite-image
+ *   - gemini-3-pro-image, gemini-2.5-flash-image
  *
- * Imagen (image generation):
- *   - imagen-4.0-generate-001, imagen-4.0-ultra-generate-001
- *   - imagen-4.0-fast-generate-001, imagen-3.0-capability-001
+ * Video generation:
+ *   - veo-3.1-generate-preview, veo-3.1-lite-generate-preview
  *
  * @see https://ai.google.dev/gemini-api/docs
  *
@@ -102,7 +103,8 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     /** @deprecated Retired; no longer published by Google. */
     public const MODEL_1_5_FLASH = 'gemini-1.5-flash';
 
-    // Image generation. Imagen is retired as a product line; these replace it.
+    // Image generation and editing, all reached through generateContent. Imagen is retired as a
+    // product line and its separate predict endpoint went with it; these replace both.
     public const MODEL_3_1_FLASH_IMAGE = 'gemini-3.1-flash-image';
     public const MODEL_3_1_FLASH_LITE_IMAGE = 'gemini-3.1-flash-lite-image';
     public const MODEL_2_5_FLASH_IMAGE = 'gemini-2.5-flash-image';
@@ -165,8 +167,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         $model = $options['model'] ?? $this->defaultModel;
         $payload = $this->buildPayload($messages, $options);
 
-        $url = self::API_BASE . "/{$model}:generateContent?key={$this->apiKey}";
-        $response = $this->request($url, $payload);
+        $response = $this->request($this->generateContentUrl($model), $payload);
 
         return $this->parseResponse($response, $messages);
     }
@@ -254,7 +255,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     /**
      * Whether this provider supports image generation from text prompts.
      *
-     * Supported via Google's Imagen 4 model family through the predict endpoint.
+     * Supported via Gemini's native image models (e.g. gemini-3.1-flash-image).
      *
      * @return bool Always true for Google
      */
@@ -266,8 +267,8 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     /**
      * Whether this provider supports AI-powered image editing.
      *
-     * Supported via Gemini's multimodal models (e.g., gemini-3-pro-image) which
-     * can accept an image + text prompt and return a modified image.
+     * Supported via Gemini's native image models (e.g. gemini-3-pro-image) which
+     * can accept an image and a text prompt and return a modified image.
      *
      * @return bool Always true for Google
      */
@@ -277,75 +278,51 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Generate images from a text prompt using Google's Imagen 4 API.
+     * Generate images from a text prompt using Gemini's native image models.
      *
-     * Sends the prompt to the Imagen predict endpoint and parses the response,
-     * handling both the "predictions" and "generatedImages" response formats.
+     * Goes through generateContent, asking for an image modality back. Imagen's separate
+     * predict endpoint is gone: the whole Imagen line shuts down on 17 August 2026 and the
+     * Gemini image models that replace it do not speak that endpoint.
      *
      * @param string $prompt Descriptive text prompt for image generation
      * @param array{
      *     model?: string,
      *     numberOfImages?: int,
      *     aspectRatio?: string,
-     *     imageSize?: int,
-     * } $options Generation options (defaults: model=imagen-4.0-fast, 1 image, 1:1 ratio)
+     *     imageSize?: string,
+     * } $options Generation options (aspect ratio and size default to the model's own)
      *
      * @return array{images: array<array{mimeType: string, data: string}>} Base64-encoded images with MIME types
      *
+     * @throws ProviderException       When more than one image is asked for, or the API returns an error
      * @throws AuthenticationException When the API key is invalid (HTTP 401)
      * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
-     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
      * @throws RuntimeException        When the cURL request itself fails
      */
     public function generateImage(string $prompt, array $options = []): array
     {
-        // Imagen, not one of the Gemini image models: the request below is Imagen-shaped
-        // (instances/parameters on :predict) and the Gemini models do not speak that endpoint.
-        // Imagen shuts down 17 August 2026, so this path needs replacing before then.
-        $model = $options['model'] ?? self::IMAGEN_4_FAST;
-        $numberOfImages = $options['numberOfImages'] ?? 1;
-        $aspectRatio = $options['aspectRatio'] ?? '1:1';
+        $numberOfImages = (int) ($options['numberOfImages'] ?? 1);
 
-        // Imagen 4 uses the predict endpoint with instances/parameters format
-        $payload = [
-            'instances' => [
-                ['prompt' => $prompt],
-            ],
-            'parameters' => [
-                'sampleCount' => $numberOfImages,
-                'aspectRatio' => $aspectRatio,
-                'outputOptions' => [
-                    'mimeType' => 'image/png',
-                ],
-            ],
-        ];
-
-        $url = self::API_BASE . "/{$model}:predict?key={$this->apiKey}";
-        $response = $this->request($url, $payload);
-
-        $images = [];
-
-        // Imagen returns predictions with bytesBase64Encoded
-        foreach ($response['predictions'] ?? [] as $prediction) {
-            if (isset($prediction['bytesBase64Encoded'])) {
-                $images[] = [
-                    'mimeType' => $prediction['mimeType'] ?? 'image/png',
-                    'data' => $prediction['bytesBase64Encoded'],
-                ];
-            }
+        // Imagen's sampleCount has no equivalent here, so a caller asking for four images
+        // would silently receive one. Refusing is the same posture as Cohere declining to
+        // fake a named tool: better a loud failure than a quiet one.
+        if ($numberOfImages > 1) {
+            throw new ProviderException(
+                sprintf(
+                    'Gemini image models return one image per request, so "numberOfImages" of %d cannot be honoured. Call generateImage() once per image instead.',
+                    $numberOfImages,
+                ),
+                $this->getName(),
+            );
         }
 
-        // Also check generateImages response format
-        foreach ($response['generatedImages'] ?? [] as $image) {
-            if (isset($image['image']['imageBytes'])) {
-                $images[] = [
-                    'mimeType' => 'image/png',
-                    'data' => $image['image']['imageBytes'],
-                ];
-            }
-        }
+        $result = $this->requestImage(
+            [['text' => $prompt]],
+            $options['model'] ?? self::MODEL_3_1_FLASH_IMAGE,
+            $options,
+        );
 
-        return ['images' => $images];
+        return ['images' => $result['images']];
     }
 
     /**
@@ -361,8 +338,8 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      * @param array{
      *     model?: string,
      *     aspectRatio?: string,
-     *     imageSize?: int,
-     * } $options Edit options (defaults: model=gemini-3-pro-image, 1:1 ratio, 2K size)
+     *     imageSize?: string,
+     * } $options Edit options (aspect ratio and size default to the source image's own)
      *
      * @return array{images: array<array{mimeType: string, data: string}>, text: string} Edited images and any descriptive text
      *
@@ -379,40 +356,66 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
             throw new RuntimeException("Failed to fetch image from: {$imageUrl}");
         }
 
-        $base64Image = base64_encode($imageData);
-        $mimeType = $this->detectMimeType($imageUrl, $imageData);
-
-        $model = $options['model'] ?? self::MODEL_3_PRO_IMAGE;
-        $aspectRatio = $options['aspectRatio'] ?? '1:1';
-        $imageSize = $options['imageSize'] ?? '2K';
-
-        $payload = [
-            'contents' => [
-                [
-                    'parts' => [
-                        [
-                            'inlineData' => [
-                                'mimeType' => $mimeType,
-                                'data' => $base64Image,
-                            ],
-                        ],
-                        ['text' => $prompt],
-                    ],
+        $parts = [
+            [
+                'inlineData' => [
+                    'mimeType' => $this->detectMimeType($imageUrl, $imageData),
+                    'data' => base64_encode($imageData),
                 ],
             ],
-            'generationConfig' => [
-                'responseModalities' => ['TEXT', 'IMAGE'],
-                'imageConfig' => [
-                    'aspectRatio' => $aspectRatio,
-                    'imageSize' => $imageSize,
-                ],
-            ],
+            ['text' => $prompt],
         ];
 
-        $url = self::API_BASE . "/{$model}:generateContent?key={$this->apiKey}";
-        $response = $this->request($url, $payload);
+        return $this->requestImage($parts, $options['model'] ?? self::MODEL_3_PRO_IMAGE, $options);
+    }
+
+    /**
+     * Ask a Gemini image model for an image and parse what comes back.
+     *
+     * Generation and editing differ only in the parts they send, so the wire format for both
+     * lives here: image output is opt-in through responseModalities, and the shape and size
+     * knobs sit in imageConfig.
+     *
+     * @param array<array<string, mixed>> $parts   The content parts, text alone or an image and text
+     * @param string                      $model   The image model to call
+     * @param array<string, mixed>        $options The caller's options, read for aspectRatio and imageSize
+     *
+     * @return array{images: array<array{mimeType: string, data: string}>, text: string} Images and any descriptive text
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails
+     */
+    private function requestImage(array $parts, string $model, array $options): array
+    {
+        $generationConfig = ['responseModalities' => ['TEXT', 'IMAGE']];
+
+        // Only sent when asked for. Inventing a 1:1 default used to reshape whatever the
+        // caller passed in, which is the same mistake as the Agent's invented temperature.
+        $imageConfig = array_filter([
+            'aspectRatio' => $options['aspectRatio'] ?? null,
+            'imageSize' => $options['imageSize'] ?? null,
+        ], static fn ($value) => $value !== null);
+
+        if ($imageConfig !== []) {
+            $generationConfig['imageConfig'] = $imageConfig;
+        }
+
+        $response = $this->request($this->generateContentUrl($model), [
+            'contents' => [['parts' => $parts]],
+            'generationConfig' => $generationConfig,
+        ]);
 
         return $this->parseImageResponse($response);
+    }
+
+    /**
+     * The generateContent endpoint for a model, with the API key Google expects on the query string.
+     */
+    private function generateContentUrl(string $model): string
+    {
+        return self::API_BASE . "/{$model}:generateContent?key={$this->apiKey}";
     }
 
     /**
@@ -946,7 +949,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      *     model?: string,
      *     numberOfImages?: int,
      *     aspectRatio?: string,
-     *     imageSize?: int,
+     *     imageSize?: string,
      * } $options Generation options passed through to generateImage()
      *
      * @return string The output path where the image was saved

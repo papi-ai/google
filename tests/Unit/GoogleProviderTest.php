@@ -16,6 +16,7 @@ use PapiAI\Core\Contracts\EmbeddingProviderInterface;
 use PapiAI\Core\Contracts\ImageProviderInterface;
 use PapiAI\Core\Contracts\ProviderInterface;
 use PapiAI\Core\EmbeddingResponse;
+use PapiAI\Core\Exception\ProviderException;
 use PapiAI\Core\Message;
 use PapiAI\Core\Response;
 use PapiAI\Core\StreamChunk;
@@ -494,51 +495,97 @@ describe('GoogleProvider', function () {
     });
 
     describe('generateImage', function () {
-        it('sends prompt to imagen predict endpoint', function () {
+        beforeEach(function () {
             $this->provider->fakeResponse = [
-                'predictions' => [
+                'candidates' => [
                     [
-                        'bytesBase64Encoded' => base64_encode('fake-png-data'),
-                        'mimeType' => 'image/png',
+                        'content' => [
+                            'parts' => [
+                                [
+                                    'inlineData' => [
+                                        'mimeType' => 'image/png',
+                                        'data' => base64_encode('fake-png-data'),
+                                    ],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ];
+        });
+
+        it('generates through generateContent, which is where the Gemini image models live', function () {
+            $result = $this->provider->generateImage('A cat');
+
+            expect($this->provider->lastUrl)->toContain(':generateContent');
+            expect($this->provider->lastPayload['contents'][0]['parts'][0]['text'])->toBe('A cat');
+            expect($result['images'])->toHaveCount(1);
+            expect($result['images'][0]['mimeType'])->toBe('image/png');
+        });
+
+        it('defaults to a Gemini image model, not the retired Imagen line', function () {
+            $this->provider->generateImage('A cat');
+
+            expect($this->provider->lastUrl)->toContain(GoogleProvider::MODEL_3_1_FLASH_IMAGE);
+            expect($this->provider->lastUrl)->not->toContain('imagen');
+        });
+
+        it('asks for an image back, which the model will not return by default', function () {
+            $this->provider->generateImage('A cat');
+
+            expect($this->provider->lastPayload['generationConfig']['responseModalities'])
+                ->toBe(['TEXT', 'IMAGE']);
+        });
+
+        it('passes the aspect ratio and size through imageConfig', function () {
+            $this->provider->generateImage('A cat', [
+                'model' => GoogleProvider::MODEL_3_PRO_IMAGE,
+                'aspectRatio' => '16:9',
+                'imageSize' => '4K',
+            ]);
+
+            expect($this->provider->lastUrl)->toContain(GoogleProvider::MODEL_3_PRO_IMAGE);
+            expect($this->provider->lastPayload['generationConfig']['imageConfig'])
+                ->toBe(['aspectRatio' => '16:9', 'imageSize' => '4K']);
+        });
+
+        it('leaves out imageConfig entirely when the caller asks for neither', function () {
+            $this->provider->generateImage('A cat');
+
+            expect($this->provider->lastPayload['generationConfig'])->not->toHaveKey('imageConfig');
+        });
+
+        it('drops the model thoughts and keeps the finished image', function () {
+            $this->provider->fakeResponse = [
+                'candidates' => [
+                    [
+                        'content' => [
+                            'parts' => [
+                                ['thought' => true, 'inlineData' => ['mimeType' => 'image/png', 'data' => 'draft']],
+                                ['inlineData' => ['mimeType' => 'image/png', 'data' => 'final']],
+                            ],
+                        ],
                     ],
                 ],
             ];
 
             $result = $this->provider->generateImage('A cat');
 
-            expect($this->provider->lastUrl)->toContain(':predict');
-            expect($this->provider->lastPayload['instances'][0]['prompt'])->toBe('A cat');
             expect($result['images'])->toHaveCount(1);
-            expect($result['images'][0]['mimeType'])->toBe('image/png');
+            expect($result['images'][0]['data'])->toBe('final');
         });
 
-        it('handles generatedImages response format', function () {
-            $this->provider->fakeResponse = [
-                'generatedImages' => [
-                    [
-                        'image' => ['imageBytes' => base64_encode('fake-data')],
-                    ],
-                ],
-            ];
-
-            $result = $this->provider->generateImage('A dog');
-
-            expect($result['images'])->toHaveCount(1);
-            expect($result['images'][0]['mimeType'])->toBe('image/png');
+        // The Gemini image models return one image per request and offer no equivalent of
+        // Imagen's sampleCount. Handing back a single image would quietly ignore the ask.
+        it('refuses a request for several images rather than returning one', function () {
+            expect(fn () => $this->provider->generateImage('A cat', ['numberOfImages' => 4]))
+                ->toThrow(ProviderException::class, 'one image per request');
         });
 
-        it('passes custom options', function () {
-            $this->provider->fakeResponse = ['predictions' => []];
+        it('accepts numberOfImages of 1, which it can honour', function () {
+            $result = $this->provider->generateImage('A cat', ['numberOfImages' => 1]);
 
-            $this->provider->generateImage('A cat', [
-                'model' => 'imagen-4.0-ultra-generate-001',
-                'numberOfImages' => 2,
-                'aspectRatio' => '16:9',
-            ]);
-
-            expect($this->provider->lastUrl)->toContain('imagen-4.0-ultra-generate-001');
-            expect($this->provider->lastPayload['parameters']['sampleCount'])->toBe(2);
-            expect($this->provider->lastPayload['parameters']['aspectRatio'])->toBe('16:9');
+            expect($result['images'])->toHaveCount(1);
         });
     });
 
@@ -693,10 +740,18 @@ describe('GoogleProvider', function () {
     describe('generateImageToFile', function () {
         it('saves generated image to file', function () {
             $this->provider->fakeResponse = [
-                'predictions' => [
+                'candidates' => [
                     [
-                        'bytesBase64Encoded' => base64_encode('fake-png-data'),
-                        'mimeType' => 'image/png',
+                        'content' => [
+                            'parts' => [
+                                [
+                                    'inlineData' => [
+                                        'mimeType' => 'image/png',
+                                        'data' => base64_encode('fake-png-data'),
+                                    ],
+                                ],
+                            ],
+                        ],
                     ],
                 ],
             ];
@@ -713,7 +768,7 @@ describe('GoogleProvider', function () {
         });
 
         it('throws when no images generated', function () {
-            $this->provider->fakeResponse = ['predictions' => []];
+            $this->provider->fakeResponse = ['candidates' => []];
 
             expect(fn () => $this->provider->generateImageToFile('A cat', '/tmp/test.png'))
                 ->toThrow(RuntimeException::class, 'No images generated');
