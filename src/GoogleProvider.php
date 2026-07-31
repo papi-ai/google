@@ -297,7 +297,10 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      */
     public function generateImage(string $prompt, array $options = []): array
     {
-        $model = $options['model'] ?? self::MODEL_3_1_FLASH_IMAGE;
+        // Imagen, not one of the Gemini image models: the request below is Imagen-shaped
+        // (instances/parameters on :predict) and the Gemini models do not speak that endpoint.
+        // Imagen shuts down 17 August 2026, so this path needs replacing before then.
+        $model = $options['model'] ?? self::IMAGEN_4_FAST;
         $numberOfImages = $options['numberOfImages'] ?? 1;
         $aspectRatio = $options['aspectRatio'] ?? '1:1';
 
