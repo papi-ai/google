@@ -100,15 +100,26 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     public const MODEL_1_5_PRO = 'gemini-1.5-pro';
     public const MODEL_1_5_FLASH = 'gemini-1.5-flash';
 
-    // Imagen model aliases for image generation and editing
+    // Image generation. Imagen is retired as a product line; these replace it.
+    public const MODEL_3_1_FLASH_IMAGE = 'gemini-3.1-flash-image';
+    public const MODEL_3_1_FLASH_LITE_IMAGE = 'gemini-3.1-flash-lite-image';
+    public const MODEL_2_5_FLASH_IMAGE = 'gemini-2.5-flash-image';
+
+    /** @deprecated Imagen shuts down 17 August 2026. Use MODEL_3_1_FLASH_IMAGE. */
     public const IMAGEN_4 = 'imagen-4.0-generate-001';
+    /** @deprecated Imagen shuts down 17 August 2026. Use MODEL_3_1_FLASH_IMAGE. */
     public const IMAGEN_4_ULTRA = 'imagen-4.0-ultra-generate-001';
+    /** @deprecated Imagen shuts down 17 August 2026. Use MODEL_3_1_FLASH_IMAGE. */
     public const IMAGEN_4_FAST = 'imagen-4.0-fast-generate-001';
+    /** @deprecated Imagen 3 is already shut down. Use MODEL_3_1_FLASH_IMAGE. */
     public const IMAGEN_EDIT = 'imagen-3.0-capability-001';
 
     // Veo model aliases for video generation
     public const MODEL_VEO_3_1 = 'veo-3.1-generate-preview';
+    public const MODEL_VEO_3_1_FAST = 'veo-3.1-fast-generate-preview';
+    /** @deprecated Shut down 30 June 2026; requests fail. Use MODEL_VEO_3_1. */
     public const MODEL_VEO_3 = 'veo-3.0-generate-001';
+    /** @deprecated Shut down 30 June 2026; requests fail. Use MODEL_VEO_3_1. */
     public const MODEL_VEO_2 = 'veo-2.0-generate-001';
 
     /** @var array<string, string> tool call ID to thought signature mapping for multi-turn tool use */
@@ -286,7 +297,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      */
     public function generateImage(string $prompt, array $options = []): array
     {
-        $model = $options['model'] ?? self::IMAGEN_4_FAST;
+        $model = $options['model'] ?? self::MODEL_3_1_FLASH_IMAGE;
         $numberOfImages = $options['numberOfImages'] ?? 1;
         $aspectRatio = $options['aspectRatio'] ?? '1:1';
 
@@ -486,7 +497,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      */
     public function startVideo(string $prompt, array $options = []): string
     {
-        $model = $options['model'] ?? self::MODEL_VEO_3;
+        $model = $options['model'] ?? self::MODEL_VEO_3_1;
         $payload = $this->buildVideoPayload($prompt, $options);
 
         $url = self::API_BASE . "/{$model}:predictLongRunning?key={$this->apiKey}";

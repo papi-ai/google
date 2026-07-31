@@ -24,7 +24,7 @@ class TestableVeoProvider extends GoogleProvider
 {
     public string $lastUrl = '';
     public array $lastPayload = [];
-    public array $startResponse = ['name' => 'models/veo-3.0-generate-001/operations/abc123'];
+    public array $startResponse = ['name' => 'models/veo-3.1-generate-preview/operations/abc123'];
 
     /** @var array<int, array> Queue of getRequest() responses, consumed in order */
     public array $pollResponses = [];
@@ -77,9 +77,9 @@ describe('GoogleProvider video generation', function () {
         it('posts to the predictLongRunning endpoint and returns the operation name', function () {
             $jobId = $this->provider->startVideo('a cat surfing');
 
-            expect($jobId)->toBe('models/veo-3.0-generate-001/operations/abc123');
+            expect($jobId)->toBe('models/veo-3.1-generate-preview/operations/abc123');
             expect($this->provider->lastUrl)
-                ->toContain('veo-3.0-generate-001:predictLongRunning')
+                ->toContain('veo-3.1-generate-preview:predictLongRunning')
                 ->toContain('key=test-api-key');
             expect($this->provider->lastPayload['instances'][0]['prompt'])->toBe('a cat surfing');
         });
@@ -147,12 +147,12 @@ describe('GoogleProvider video generation', function () {
                 ]]],
             ]];
 
-            $video = $this->provider->fetchVideo('models/veo-3.0-generate-001/operations/abc');
+            $video = $this->provider->fetchVideo('models/veo-3.1-generate-preview/operations/abc');
 
             expect($video)->toBeInstanceOf(VideoResponse::class);
             expect($video->data)->toBe('fake-video-binary');
             expect($video->uri)->toBe('https://files.test/clip');
-            expect($video->model)->toBe('veo-3.0-generate-001');
+            expect($video->model)->toBe('veo-3.1-generate-preview');
         });
 
         it('decodes inline base64 video bytes', function () {
