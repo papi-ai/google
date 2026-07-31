@@ -91,13 +91,15 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     /** @deprecated Shut down 9 March 2026; the alias now redirects to gemini-3.1-pro-preview. */
     public const MODEL_3_0_PRO = 'gemini-3-pro-preview';
     public const MODEL_3_FLASH = 'gemini-3-flash-preview';
-    public const MODEL_3_PRO_IMAGE = 'gemini-3-pro-image-preview';
+    public const MODEL_3_PRO_IMAGE = 'gemini-3-pro-image';
     public const MODEL_2_5_PRO = 'gemini-2.5-pro';
     public const MODEL_2_5_FLASH = 'gemini-2.5-flash';
     public const MODEL_2_5_FLASH_LITE = 'gemini-2.5-flash-lite';
     public const MODEL_2_0_FLASH = 'gemini-2.0-flash';
     public const MODEL_2_0_FLASH_LITE = 'gemini-2.0-flash-lite';
+    /** @deprecated Retired; no longer published by Google. */
     public const MODEL_1_5_PRO = 'gemini-1.5-pro';
+    /** @deprecated Retired; no longer published by Google. */
     public const MODEL_1_5_FLASH = 'gemini-1.5-flash';
 
     // Image generation. Imagen is retired as a product line; these replace it.
@@ -116,7 +118,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
 
     // Veo model aliases for video generation
     public const MODEL_VEO_3_1 = 'veo-3.1-generate-preview';
-    public const MODEL_VEO_3_1_FAST = 'veo-3.1-fast-generate-preview';
+    public const MODEL_VEO_3_1_LITE = 'veo-3.1-lite-generate-preview';
     /** @deprecated Shut down 30 June 2026; requests fail. Use MODEL_VEO_3_1. */
     public const MODEL_VEO_3 = 'veo-3.0-generate-001';
     /** @deprecated Shut down 30 June 2026; requests fail. Use MODEL_VEO_3_1. */

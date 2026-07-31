@@ -4,8 +4,9 @@ name: Model watch
 # underneath us. That has now happened repeatedly and silently: the chat default was shut down in
 # March and nobody noticed until July, and the video default had been dead for a month.
 #
-# This job asks the provider what it currently serves and opens an issue when something we ship no
-# longer appears. It needs no API key: the model-list endpoint is public.
+# This job compares what we ship against Google's published model list and opens an issue when
+# something has gone. It reads the public documentation rather than the API, so it needs no
+# credential: a watchdog on a public repository must not depend on someone attaching a billable key.
 
 on:
   schedule:
@@ -33,8 +34,6 @@ jobs:
       - name: Check models
         id: check
         run: php .github/model-watch.php
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
       - name: Open an issue when something we ship has gone
         if: failure()
