@@ -1,0 +1,71 @@
+name: Model watch
+
+# Every model ID in this package is a string we wrote down once and the provider can retire
+# underneath us. That has now happened repeatedly and silently: the chat default was shut down in
+# March and nobody noticed until July, and the video default had been dead for a month.
+#
+# This job asks the provider what it currently serves and opens an issue when something we ship no
+# longer appears. It needs no API key: the model-list endpoint is public.
+
+on:
+  schedule:
+    # Weekly, early Monday. Retirements are announced with weeks of notice, so this is frequent
+    # enough to catch them and rare enough not to be noise.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Compare shipped model IDs against the provider
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - name: Check models
+        id: check
+        run: php .github/model-watch.php
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Open an issue when something we ship has gone
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Model watch: a shipped model ID is no longer served';
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'model-watch',
+            });
+
+            if (existing.data.length > 0) {
+              core.info('An open model-watch issue already exists; not filing another.');
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ['model-watch'],
+              body: [
+                'The scheduled model check failed, which means at least one model ID this package',
+                'ships is no longer listed by the provider.',
+                '',
+                `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                '',
+                'Check the run log for which IDs are missing. Anything used as a **default** is the',
+                'urgent part: a dead default breaks every caller who does not pass a model explicitly.',
+              ].join('\n'),
+            });
