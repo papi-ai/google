@@ -16,12 +16,12 @@ use PapiAI\Google\GoogleProvider;
 
 $provider = new GoogleProvider(
     apiKey: $_ENV['GOOGLE_API_KEY'],
-    defaultModel: GoogleProvider::MODEL_3_0_PRO,
+    defaultModel: GoogleProvider::MODEL_3_6_FLASH,
 );
 
 $agent = new Agent(
     provider: $provider,
-    model: 'gemini-3.0-pro',
+    model: GoogleProvider::MODEL_3_6_FLASH,
     instructions: 'You are a helpful assistant.',
 );
 
@@ -34,43 +34,48 @@ echo $response->text;
 ### Chat Models
 
 ```php
-GoogleProvider::MODEL_3_1_PRO       // gemini-3.1-pro (newest)
-GoogleProvider::MODEL_3_0_PRO       // gemini-3.0-pro
-GoogleProvider::MODEL_3_FLASH       // gemini-3-flash
-GoogleProvider::MODEL_2_5_PRO       // gemini-2.5-pro
-GoogleProvider::MODEL_2_5_FLASH     // gemini-2.5-flash
-GoogleProvider::MODEL_2_0_FLASH     // gemini-2.0-flash
-GoogleProvider::MODEL_1_5_PRO       // gemini-1.5-pro
-GoogleProvider::MODEL_1_5_FLASH     // gemini-1.5-flash
+GoogleProvider::MODEL_3_6_FLASH      // gemini-3.6-flash (default)
+GoogleProvider::MODEL_3_5_FLASH      // gemini-3.5-flash
+GoogleProvider::MODEL_3_5_FLASH_LITE // gemini-3.5-flash-lite
+GoogleProvider::MODEL_3_1_PRO        // gemini-3.1-pro-preview
+GoogleProvider::MODEL_3_FLASH        // gemini-3-flash-preview
+GoogleProvider::MODEL_2_5_PRO        // gemini-2.5-pro
+GoogleProvider::MODEL_2_5_FLASH      // gemini-2.5-flash
+GoogleProvider::MODEL_2_5_FLASH_LITE // gemini-2.5-flash-lite
+GoogleProvider::MODEL_2_0_FLASH      // gemini-2.0-flash
 ```
 
-### Image Generation (Imagen)
+### Image Models
 
 ```php
-GoogleProvider::IMAGEN_4            // imagen-4.0-generate-001
-GoogleProvider::IMAGEN_4_ULTRA      // imagen-4.0-ultra-generate-001
+GoogleProvider::MODEL_3_1_FLASH_IMAGE      // gemini-3.1-flash-image (default)
+GoogleProvider::MODEL_3_1_FLASH_LITE_IMAGE // gemini-3.1-flash-lite-image
+GoogleProvider::MODEL_3_PRO_IMAGE          // gemini-3-pro-image
+GoogleProvider::MODEL_2_5_FLASH_IMAGE      // gemini-2.5-flash-image
 ```
+
+The `IMAGEN_*` constants remain for backwards compatibility and are all `@deprecated`. Imagen
+shuts down on 17 August 2026 and its separate `:predict` endpoint goes with it.
 
 ## Image Generation
 
-Generate images using Google's Imagen model:
+Image generation and editing both go through `generateContent`, asking for an image modality
+back. There is no separate endpoint any more.
 
 ```php
 use PapiAI\Google\GoogleProvider;
 
 $provider = new GoogleProvider($_ENV['GOOGLE_API_KEY']);
 
-// Generate image and get base64 data
 $result = $provider->generateImage(
     prompt: 'A professional product photo of headphones',
     options: [
-        'model' => GoogleProvider::IMAGEN_4,
-        'aspectRatio' => '1:1',      // 1:1, 16:9, 9:16, 4:3, 3:4
-        'numberOfImages' => 1,
+        'model' => GoogleProvider::MODEL_3_1_FLASH_IMAGE,
+        'aspectRatio' => '1:1',  // 1:1, 16:9, 9:16, 4:3, 3:4, and more on 3.1 Flash Image
+        'imageSize' => '2K',     // 1K, 2K or 4K
     ]
 );
 
-// Access generated image
 $imageData = base64_decode($result['images'][0]['data']);
 file_put_contents('output.png', $imageData);
 
@@ -79,6 +84,25 @@ $provider->generateImageToFile(
     prompt: 'A modern minimalist workspace',
     outputPath: '/path/to/image.png',
 );
+```
+
+Both options are optional. Omit them and the model chooses, rather than being pushed into a
+square by a default the caller never asked for.
+
+One image comes back per request. `numberOfImages` above 1 throws a `ProviderException` rather
+than silently returning a single image, because the Gemini image models have no equivalent of
+Imagen's `sampleCount`.
+
+## Image Editing
+
+```php
+$result = $provider->editImage(
+    imageUrl: 'https://example.com/photo.jpg',
+    prompt: 'Make the sky dramatic and overcast',
+);
+
+file_put_contents('edited.png', base64_decode($result['images'][0]['data']));
+echo $result['text'];
 ```
 
 ## Capabilities
@@ -93,9 +117,12 @@ $provider->generateImageToFile(
 | Embeddings | Yes |
 | Image generation | Yes |
 | Image editing | Yes |
+| Video generation | Yes |
+| Forced tool choice | Yes, including a named tool |
+| Reasoning effort | Yes |
 
 ## Requirements
 
 - PHP 8.2+
 - `ext-curl`
-- `papi-ai/papi-core` ^0.14
+- `papi-ai/papi-core` ^0.15
