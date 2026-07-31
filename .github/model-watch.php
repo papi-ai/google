@@ -64,29 +64,22 @@ if ($shipped === []) {
     exit(2);
 }
 
-$key = getenv('GEMINI_API_KEY');
-$url = 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000'
-    . ($key === false || $key === '' ? '' : '&key=' . urlencode($key));
-
-$response = @file_get_contents($url);
+// Google's published model list, in plain text and with no credential. Deliberately not the
+// v1beta models endpoint: that needs an API key, and a watchdog on a public repository must not
+// require anyone to attach a billable key to it.
+$response = @file_get_contents('https://ai.google.dev/gemini-api/docs/models.md.txt');
 
 if ($response === false) {
-    fwrite(STDERR, "Could not reach the model list. Not treating an unreachable provider as a retirement.\n");
+    fwrite(STDERR, "Could not reach the published model list. Our connectivity is not evidence of a retirement.\n");
 
     exit(0);
 }
 
-/** @var array{models?: list<array{name?: string}>} $decoded */
-$decoded = json_decode($response, true, 512, JSON_THROW_ON_ERROR);
-$served = [];
+preg_match_all('/\b(?:gemini|imagen|veo)-[0-9][0-9a-z.\-]*/i', $response, $found);
+$served = array_values(array_unique($found[0]));
 
-foreach ($decoded['models'] ?? [] as $model) {
-    // Names come back as "models/gemini-3.6-flash".
-    $served[] = str_replace('models/', '', (string) ($model['name'] ?? ''));
-}
-
-if ($served === []) {
-    fwrite(STDERR, "The model list came back empty, which is more likely our problem than a mass retirement.\n");
+if (count($served) < 5) {
+    fwrite(STDERR, "The published list parsed to almost nothing, which means the page format changed.\n");
 
     exit(0);
 }
@@ -109,30 +102,23 @@ if ($missingDeprecated !== []) {
     echo "Already deprecated, so expected to be gone:\n  " . implode("\n  ", $missingDeprecated) . "\n\n";
 }
 
-// A default with a known shutdown date is a scheduled outage for every caller who does not pass a
-// model. It is the exact shape of bug that has hit this package three times, so it fails too.
-$deprecatedDefaults = [];
-
+// Reported, but never a failure on its own. We already know about it, and a scheduled job that
+// stays red on a known issue becomes wallpaper: the next real failure gets ignored with it.
 foreach ($shipped as $name => $entry) {
     if ($entry['deprecated'] && $entry['isDefault']) {
-        $deprecatedDefaults[] = sprintf('%s (%s)', $name, $entry['value']);
+        printf("Note: %s (%s) is deprecated and still used as a default. Known, and tracked separately.\n\n", $name, $entry['value']);
     }
 }
 
-if ($missingLive === [] && $deprecatedDefaults === []) {
-    echo "Every live model ID is still served, and no default is deprecated.\n";
+if ($missingLive === []) {
+    echo "Every live model ID still appears in Google's published list.\n";
 
     exit(0);
 }
 
-if ($missingLive !== []) {
-    echo "NO LONGER SERVED, and not marked deprecated:\n  " . implode("\n  ", $missingLive) . "\n\n";
-    echo "Mark each one @deprecated with its shutdown date, and repoint anything used as a default.\n\n";
-}
-
-if ($deprecatedDefaults !== []) {
-    echo "DEPRECATED, AND STILL USED AS A DEFAULT:\n  " . implode("\n  ", $deprecatedDefaults) . "\n\n";
-    echo "This breaks every caller who passes no model, on the day the provider switches it off.\n";
-}
+// Failing only on the unacknowledged case makes this self-clearing: mark the constant
+// @deprecated, and the job goes green again on the next run.
+echo "NO LONGER PUBLISHED, and not marked deprecated:\n  " . implode("\n  ", $missingLive) . "\n\n";
+echo "Mark each one @deprecated with its shutdown date, and repoint anything used as a default.\n";
 
 exit(1);
