@@ -76,13 +76,17 @@ $result = $provider->generateImage(
     ]
 );
 
-$imageData = base64_decode($result['images'][0]['data']);
-file_put_contents('output.png', $imageData);
+$image = $result['images'][0];
 
-// Or save directly to file
+// These models return JPEG by default, so take the extension from the response
+// rather than assuming PNG.
+$extension = str_replace('image/', '', $image['mimeType']);
+file_put_contents("output.{$extension}", base64_decode($image['data']));
+
+// Or save directly to file, choosing your own path
 $provider->generateImageToFile(
     prompt: 'A modern minimalist workspace',
-    outputPath: '/path/to/image.png',
+    outputPath: '/path/to/image.jpg',
 );
 ```
 
@@ -101,7 +105,7 @@ $result = $provider->editImage(
     prompt: 'Make the sky dramatic and overcast',
 );
 
-file_put_contents('edited.png', base64_decode($result['images'][0]['data']));
+file_put_contents('edited.jpg', base64_decode($result['images'][0]['data']));
 echo $result['text'];
 ```
 
