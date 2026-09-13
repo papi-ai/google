@@ -12,6 +12,8 @@
 
 declare(strict_types=1);
 
+use PapiAI\Google\GeminiModel;
+
 /*
  * Compares the model IDs this package ships against what the provider currently serves.
  *
@@ -23,6 +25,8 @@ declare(strict_types=1);
  * them on purpose so callers get a deprecation note rather than an undefined-constant fatal.
  */
 
+require __DIR__ . '/../vendor/autoload.php';
+
 $source = file_get_contents(__DIR__ . '/../src/GoogleProvider.php');
 
 if ($source === false) {
@@ -33,28 +37,24 @@ if ($source === false) {
 
 /** @var array<string, array{value: string, deprecated: bool, isDefault: bool}> $shipped */
 $shipped = [];
-$lines = explode("\n", $source);
 
-// Line by line, not one big regex. A regex that also tries to capture the preceding docblock
-// matches across earlier constants and silently drops them, and a checker that quietly skips
-// models is worse than no checker: the ones it skipped here were the newest four.
-foreach ($lines as $number => $line) {
-    if (preg_match('/public const (?P<name>MODEL_\w+|IMAGEN_\w+) = \'(?P<value>[^\']+)\';/', $line, $match) !== 1) {
-        continue;
-    }
-
-    // Only the line immediately above can carry the marker, which is where php-cs-fixer puts it.
-    $shipped[$match['name']] = [
-        'value' => $match['value'],
-        'deprecated' => str_contains($lines[$number - 1] ?? '', '@deprecated'),
+// The enum is the source of truth: every ID we ship is a case, and each case knows whether it
+// has been retired. No parsing of docblocks, which is what silently skipped four models before.
+foreach (GeminiModel::cases() as $model) {
+    $shipped[$model->name] = [
+        'value' => $model->value,
+        'deprecated' => $model->isDeprecated(),
         'isDefault' => false,
     ];
 }
 
 // Anything used as a fallback is the dangerous kind: it breaks callers who pass no model at all.
-foreach ($shipped as $name => $entry) {
-    if (preg_match('/\?\?\s*self::' . preg_quote($name, '/') . '\b/', $source) === 1) {
-        $shipped[$name]['isDefault'] = true;
+// The provider spells a default as `?? self::CONSTANT`, and each constant aliases an enum case.
+preg_match_all('/public const (?P<constant>\w+) = GeminiModel::(?P<case>\w+)->value;/', $source, $aliases, PREG_SET_ORDER);
+
+foreach ($aliases as $alias) {
+    if (isset($shipped[$alias['case']]) && preg_match('/\?\?\s*self::' . preg_quote($alias['constant'], '/') . '\b/', $source) === 1) {
+        $shipped[$alias['case']]['isDefault'] = true;
     }
 }
 

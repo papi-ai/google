@@ -16,12 +16,12 @@ use PapiAI\Google\GoogleProvider;
 
 $provider = new GoogleProvider(
     apiKey: $_ENV['GOOGLE_API_KEY'],
-    defaultModel: GoogleProvider::MODEL_3_6_FLASH,
+    defaultModel: GoogleProvider::MODEL_3_8_FLASH,
 );
 
 $agent = new Agent(
     provider: $provider,
-    model: GoogleProvider::MODEL_3_6_FLASH,
+    model: GoogleProvider::MODEL_3_8_FLASH,
     instructions: 'You are a helpful assistant.',
 );
 
@@ -34,7 +34,9 @@ echo $response->text;
 ### Chat Models
 
 ```php
-GoogleProvider::MODEL_3_6_FLASH      // gemini-3.6-flash (default)
+GoogleProvider::MODEL_3_8_FLASH      // gemini-3.8-flash (default)
+GoogleProvider::MODEL_3_7_FLASH      // gemini-3.7-flash
+GoogleProvider::MODEL_3_6_FLASH      // gemini-3.6-flash
 GoogleProvider::MODEL_3_5_FLASH      // gemini-3.5-flash
 GoogleProvider::MODEL_3_5_FLASH_LITE // gemini-3.5-flash-lite
 GoogleProvider::MODEL_3_1_PRO        // gemini-3.1-pro-preview

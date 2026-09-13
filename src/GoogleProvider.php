@@ -85,46 +85,49 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     private const MAX_THINKING_BUDGET = 32768;
 
     // Gemini model aliases
-    public const MODEL_3_6_FLASH = 'gemini-3.6-flash';
-    public const MODEL_3_5_FLASH = 'gemini-3.5-flash';
-    public const MODEL_3_5_FLASH_LITE = 'gemini-3.5-flash-lite';
-    public const MODEL_3_1_PRO = 'gemini-3.1-pro-preview';
+    public const MODEL_3_8_FLASH = GeminiModel::Flash38->value;
+    public const MODEL_3_7_FLASH = GeminiModel::Flash37->value;
+    public const MODEL_3_6_FLASH = GeminiModel::Flash36->value;
+    public const MODEL_3_5_FLASH = GeminiModel::Flash35->value;
+    public const MODEL_3_5_FLASH_LITE = GeminiModel::Flash35Lite->value;
+    public const MODEL_3_1_PRO = GeminiModel::Pro31->value;
     /** @deprecated Shut down 9 March 2026; the alias now redirects to gemini-3.1-pro-preview. */
-    public const MODEL_3_0_PRO = 'gemini-3-pro-preview';
-    public const MODEL_3_FLASH = 'gemini-3-flash-preview';
-    public const MODEL_3_PRO_IMAGE = 'gemini-3-pro-image';
-    public const MODEL_2_5_PRO = 'gemini-2.5-pro';
-    public const MODEL_2_5_FLASH = 'gemini-2.5-flash';
-    public const MODEL_2_5_FLASH_LITE = 'gemini-2.5-flash-lite';
-    public const MODEL_2_0_FLASH = 'gemini-2.0-flash';
-    public const MODEL_2_0_FLASH_LITE = 'gemini-2.0-flash-lite';
+    public const MODEL_3_0_PRO = GeminiModel::Pro3->value;
+    public const MODEL_3_1_FLASH_LITE = GeminiModel::Flash31Lite->value;
+    public const MODEL_3_FLASH = GeminiModel::Flash3->value;
+    public const MODEL_3_PRO_IMAGE = GeminiModel::Pro3Image->value;
+    public const MODEL_2_5_PRO = GeminiModel::Pro25->value;
+    public const MODEL_2_5_FLASH = GeminiModel::Flash25->value;
+    public const MODEL_2_5_FLASH_LITE = GeminiModel::Flash25Lite->value;
+    public const MODEL_2_0_FLASH = GeminiModel::Flash20->value;
+    public const MODEL_2_0_FLASH_LITE = GeminiModel::Flash20Lite->value;
     /** @deprecated Retired; no longer published by Google. */
-    public const MODEL_1_5_PRO = 'gemini-1.5-pro';
+    public const MODEL_1_5_PRO = GeminiModel::Pro15->value;
     /** @deprecated Retired; no longer published by Google. */
-    public const MODEL_1_5_FLASH = 'gemini-1.5-flash';
+    public const MODEL_1_5_FLASH = GeminiModel::Flash15->value;
 
     // Image generation and editing, all reached through generateContent. Imagen is retired as a
     // product line and its separate predict endpoint went with it; these replace both.
-    public const MODEL_3_1_FLASH_IMAGE = 'gemini-3.1-flash-image';
-    public const MODEL_3_1_FLASH_LITE_IMAGE = 'gemini-3.1-flash-lite-image';
-    public const MODEL_2_5_FLASH_IMAGE = 'gemini-2.5-flash-image';
+    public const MODEL_3_1_FLASH_IMAGE = GeminiModel::Flash31Image->value;
+    public const MODEL_3_1_FLASH_LITE_IMAGE = GeminiModel::Flash31LiteImage->value;
+    public const MODEL_2_5_FLASH_IMAGE = GeminiModel::Flash25Image->value;
 
     /** @deprecated Imagen shuts down 17 August 2026. Use MODEL_3_1_FLASH_IMAGE. */
-    public const IMAGEN_4 = 'imagen-4.0-generate-001';
+    public const IMAGEN_4 = GeminiModel::Imagen4->value;
     /** @deprecated Imagen shuts down 17 August 2026. Use MODEL_3_1_FLASH_IMAGE. */
-    public const IMAGEN_4_ULTRA = 'imagen-4.0-ultra-generate-001';
+    public const IMAGEN_4_ULTRA = GeminiModel::Imagen4Ultra->value;
     /** @deprecated Imagen shuts down 17 August 2026. Use MODEL_3_1_FLASH_IMAGE. */
-    public const IMAGEN_4_FAST = 'imagen-4.0-fast-generate-001';
+    public const IMAGEN_4_FAST = GeminiModel::Imagen4Fast->value;
     /** @deprecated Imagen 3 is already shut down. Use MODEL_3_1_FLASH_IMAGE. */
-    public const IMAGEN_EDIT = 'imagen-3.0-capability-001';
+    public const IMAGEN_EDIT = GeminiModel::ImagenEdit->value;
 
     // Veo model aliases for video generation
-    public const MODEL_VEO_3_1 = 'veo-3.1-generate-preview';
-    public const MODEL_VEO_3_1_LITE = 'veo-3.1-lite-generate-preview';
+    public const MODEL_VEO_3_1 = GeminiModel::Veo31->value;
+    public const MODEL_VEO_3_1_LITE = GeminiModel::Veo31Lite->value;
     /** @deprecated Shut down 30 June 2026; requests fail. Use MODEL_VEO_3_1. */
-    public const MODEL_VEO_3 = 'veo-3.0-generate-001';
+    public const MODEL_VEO_3 = GeminiModel::Veo3->value;
     /** @deprecated Shut down 30 June 2026; requests fail. Use MODEL_VEO_3_1. */
-    public const MODEL_VEO_2 = 'veo-2.0-generate-001';
+    public const MODEL_VEO_2 = GeminiModel::Veo2->value;
 
     /** @var array<string, string> tool call ID to thought signature mapping for multi-turn tool use */
     private array $thoughtSignatures = [];
@@ -139,7 +142,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      */
     public function __construct(
         private readonly string $apiKey,
-        private readonly string $defaultModel = self::MODEL_3_6_FLASH,
+        private readonly string $defaultModel = self::MODEL_3_8_FLASH,
         private readonly int $defaultMaxTokens = 8192,
         private readonly ?Effort $defaultEffort = null,
     ) {
@@ -1133,6 +1136,12 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      */
     private function levelsFor(string $model): array
     {
+        $known = GeminiModel::tryFrom($model)?->effortLevels() ?? [];
+
+        if ($known !== []) {
+            return $known;
+        }
+
         if (stripos($model, 'pro') !== false) {
             return [Effort::Low, Effort::Medium, Effort::High];
         }
@@ -1149,7 +1158,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      */
     private function budgetFor(Effort $effort, string $model, int $maxTokens): int
     {
-        $canDisable = stripos($model, 'flash') !== false;
+        $canDisable = GeminiModel::tryFrom($model)?->canDisableThinking() ?? stripos($model, 'flash') !== false;
 
         if (!$effort->thinks() && $canDisable) {
             return 0;
@@ -1167,7 +1176,8 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      */
     private function takesThinkingLevel(string $model): bool
     {
-        return preg_match('/gemini-([3-9]|\d{2,})/i', $model) === 1;
+        return GeminiModel::tryFrom($model)?->takesThinkingLevel()
+            ?? preg_match('/gemini-([3-9]|\d{2,})/i', $model) === 1;
     }
 
     /**
