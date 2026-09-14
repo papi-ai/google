@@ -730,8 +730,6 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $error = curl_error($ch);
 
-        curl_close($ch);
-
         if ($error !== '') {
             throw new RuntimeException("Google API request failed: {$error}");
         }
@@ -769,8 +767,6 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         $data = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $error = curl_error($ch);
-
-        curl_close($ch);
 
         if ($error !== '' || $httpCode >= 400 || !is_string($data)) {
             return false;
@@ -1419,8 +1415,6 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $error = curl_error($ch);
 
-        curl_close($ch);
-
         if ($error !== '') {
             throw new RuntimeException("Google API request failed: {$error}");
         }
@@ -1467,8 +1461,6 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $error = curl_error($ch);
-
-        curl_close($ch);
 
         if ($error !== '') {
             throw new RuntimeException("Google API request failed: {$error}");
@@ -1556,7 +1548,6 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         ]);
 
         curl_exec($ch);
-        curl_close($ch);
 
         // Parse SSE events
         $lines = explode("\n", $buffer);
