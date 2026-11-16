@@ -158,10 +158,10 @@ describe('GoogleProvider on the Interactions API', function () {
                 Message::toolResult('fc_1', '{"temp": 21}'),
             ]);
 
-            expect($this->provider->lastPayload['input'])->toBe([
+            expect($this->provider->lastPayload['input'])->toEqual([
                 ['type' => 'user_input', 'content' => [['type' => 'text', 'text' => 'Weather?']]],
                 ['type' => 'thought', 'signature' => 'sig-1'],
-                ['type' => 'function_call', 'id' => 'fc_1', 'name' => 'get_weather', 'arguments' => ['city' => 'Lisbon']],
+                ['type' => 'function_call', 'id' => 'fc_1', 'name' => 'get_weather', 'arguments' => (object) ['city' => 'Lisbon']],
                 ['type' => 'function_result', 'name' => 'get_weather', 'call_id' => 'fc_1', 'result' => [['type' => 'text', 'text' => '{"temp": 21}']]],
             ]);
         });
@@ -310,5 +310,42 @@ describe('GoogleProvider stop reason', function () {
         expect(($this->stoppedBecause)(['status' => 'requires_continuation']))->toBe(StopReason::MaxTokens);
         expect(($this->stoppedBecause)(['status' => 'failed']))->toBe(StopReason::Other);
         expect(($this->stoppedBecause)(['steps' => [['type' => 'function_call', 'id' => 'c1', 'name' => 'f', 'arguments' => []]]]))->toBe(StopReason::ToolCalls);
+    });
+});
+
+describe('GoogleProvider tool calls without arguments', function () {
+    it('re-sends them as an empty object, which the API requires', function () {
+        $provider = new TestableInteractionsProvider('test-api-key');
+        $provider->fakeResponse = ['status' => 'completed', 'steps' => [['type' => 'model_output', 'content' => [['type' => 'text', 'text' => 'done']]]], 'usage' => []];
+
+        $provider->chat([
+            Message::user('Run the specs'),
+            Message::assistant('', [new ToolCall('c1', 'run_specs', [])]),
+            Message::toolResult('c1', 'ok'),
+        ]);
+
+        $wire = (string) json_encode($provider->lastPayload);
+        expect($wire)->toContain('"arguments":{}');
+        expect($wire)->not->toContain('"arguments":[]');
+    });
+
+    it('replays a turn whose call had no arguments with an empty object too', function () {
+        $provider = new TestableInteractionsProvider('test-api-key');
+        $provider->fakeResponse = [
+            'status' => 'completed',
+            'steps' => [
+                ['type' => 'thought', 'signature' => 'sig'],
+                ['type' => 'function_call', 'id' => 'fc_1', 'name' => 'run_specs', 'arguments' => []],
+            ],
+            'usage' => [],
+        ];
+        $first = $provider->chat([Message::user('Run the specs')]);
+
+        $provider->fakeResponse = ['status' => 'completed', 'steps' => [], 'usage' => []];
+        $provider->chat([Message::user('Run the specs'), Message::assistant('', $first->toolCalls), Message::toolResult('fc_1', 'ok')]);
+
+        $wire = (string) json_encode($provider->lastPayload);
+        expect($wire)->toContain('{"type":"function_call","id":"fc_1","name":"run_specs","arguments":{}}');
+        expect($wire)->toContain('"signature":"sig"');
     });
 });
