@@ -1232,7 +1232,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
             }
 
             foreach ($message->toolCalls as $toolCall) {
-                $items[] = ['type' => 'function_call', 'id' => $toolCall->id, 'name' => $toolCall->name, 'arguments' => (object) $toolCall->arguments];
+                $items[] = ['type' => 'function_call', 'id' => $toolCall->id, 'name' => $toolCall->name, 'arguments' => $toolCall->argumentsAsObject()];
             }
 
             return $items;
@@ -1351,7 +1351,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
                     arguments: is_array($arguments) ? $arguments : (json_decode((string) $arguments, true) ?? []),
                 );
                 $this->callNames[$toolCall->id] = $toolCall->name;
-                $this->turnSteps[$toolCall->id] = array_values($steps);
+                $this->turnSteps[$toolCall->id] = $this->replayable($steps);
                 $toolCalls[] = $toolCall;
             }
         }
@@ -1567,5 +1567,23 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
             'incomplete', 'requires_continuation' => StopReason::MaxTokens,
             default => StopReason::Other,
         };
+    }
+
+    /**
+     * A turn's steps as they must go back: exactly as received, except that a function call's
+     * arguments stay an object when the model passed none, which decoding turns into a list.
+     *
+     * @param array<array-key, mixed> $steps
+     *
+     * @return list<mixed>
+     */
+    private function replayable(array $steps): array
+    {
+        return array_map(
+            static fn (mixed $step): mixed => is_array($step) && ($step['type'] ?? '') === 'function_call' && is_array($step['arguments'] ?? null)
+                ? array_replace($step, ['arguments' => (object) $step['arguments']])
+                : $step,
+            array_values($steps),
+        );
     }
 }
