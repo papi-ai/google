@@ -14,6 +14,7 @@ declare(strict_types=1);
 
 use PapiAI\Core\Exception\ProviderException;
 use PapiAI\Core\Message;
+use PapiAI\Core\StopReason;
 use PapiAI\Core\StreamChunk;
 use PapiAI\Core\ToolCall;
 use PapiAI\Google\GoogleProvider;
@@ -287,5 +288,27 @@ describe('GoogleProvider on the Interactions API', function () {
             expect(fn () => $this->provider->generateImage('A cat', ['numberOfImages' => 3]))
                 ->toThrow(ProviderException::class, 'one image per request');
         });
+    });
+});
+
+describe('GoogleProvider stop reason', function () {
+    beforeEach(function () {
+        $this->provider = new TestableInteractionsProvider('test-api-key');
+        $this->stoppedBecause = function (array $response): StopReason {
+            $this->provider->fakeResponse = $response + [
+                'steps' => [['type' => 'model_output', 'content' => [['type' => 'text', 'text' => 'x']]]],
+                'usage' => [],
+            ];
+
+            return $this->provider->chat([Message::user('Hi')])->stoppedBecause;
+        };
+    });
+
+    it('says why the model stopped in core\'s vocabulary', function () {
+        expect(($this->stoppedBecause)(['status' => 'completed']))->toBe(StopReason::Stop);
+        expect(($this->stoppedBecause)(['status' => 'incomplete']))->toBe(StopReason::MaxTokens);
+        expect(($this->stoppedBecause)(['status' => 'requires_continuation']))->toBe(StopReason::MaxTokens);
+        expect(($this->stoppedBecause)(['status' => 'failed']))->toBe(StopReason::Other);
+        expect(($this->stoppedBecause)(['steps' => [['type' => 'function_call', 'id' => 'c1', 'name' => 'f', 'arguments' => []]]]))->toBe(StopReason::ToolCalls);
     });
 });

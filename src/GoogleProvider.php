@@ -30,6 +30,7 @@ use PapiAI\Core\JobStatus;
 use PapiAI\Core\Message;
 use PapiAI\Core\Response;
 use PapiAI\Core\Role;
+use PapiAI\Core\StopReason;
 use PapiAI\Core\StreamChunk;
 use PapiAI\Core\ToolCall;
 use PapiAI\Core\ToolChoice;
@@ -1361,6 +1362,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
             messages: $messages,
             usage: $this->usageOf($response['usage'] ?? []),
             stopReason: $this->stopReasonOf($response, $toolCalls !== []),
+            stoppedBecause: $this->stoppedBecauseOf($response, $toolCalls !== []),
         );
     }
 
@@ -1546,5 +1548,24 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
                 }
             }
         }
+    }
+
+    /**
+     * Why the model stopped, in core's vocabulary. Google reports a turn cut short by the output
+     * ceiling as "incomplete", or as "requires_continuation" when it can be resumed.
+     *
+     * @param array<string, mixed> $response
+     */
+    private function stoppedBecauseOf(array $response, bool $calledTools): StopReason
+    {
+        if ($calledTools) {
+            return StopReason::ToolCalls;
+        }
+
+        return match ($response['status'] ?? 'completed') {
+            'completed' => StopReason::Stop,
+            'incomplete', 'requires_continuation' => StopReason::MaxTokens,
+            default => StopReason::Other,
+        };
     }
 }
