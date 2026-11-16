@@ -145,6 +145,26 @@ file_put_contents('edited.jpg', base64_decode($result['images'][0]['data']));
 echo $result['text']; // any commentary the model returned alongside the image
 ```
 
+## Creating It by Name
+
+An application that picks its provider from configuration can build this one without naming
+its class:
+
+```php
+use PapiAI\Core\Factory\ComposerDiscovery;
+use PapiAI\Core\Factory\ProviderRegistry;
+
+$registry = new ProviderRegistry(new ComposerDiscovery());
+
+$provider = $registry->create('google', [
+    'api_key' => $_ENV['GOOGLE_API_KEY'],
+]);
+```
+
+It takes `api_key` (required), `model`, `max_tokens` and `effort`. Anything it is not given falls
+back to the constructor's defaults, and a missing or unknown setting throws `ConfigurationException`
+before any request is made.
+
 ## License
 
 MIT
