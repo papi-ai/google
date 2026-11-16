@@ -64,22 +64,26 @@ if ($shipped === []) {
     exit(2);
 }
 
-// Google's published model list, in plain text and with no credential. Deliberately not the
+// Google's published model lists, in plain text and with no credential. Deliberately not the
 // v1beta models endpoint: that needs an API key, and a watchdog on a public repository must not
-// require anyone to attach a billable key to it.
-$response = @file_get_contents('https://ai.google.dev/gemini-api/docs/models.md.txt');
+// require anyone to attach a billable key to it. Video models are published on their own page.
+$served = [];
 
-if ($response === false) {
-    fwrite(STDERR, "Could not reach the published model list. Our connectivity is not evidence of a retirement.\n");
+foreach (['https://ai.google.dev/gemini-api/docs/models.md.txt', 'https://aistudio.google.com/docs/video.md'] as $url) {
+    $response = @file_get_contents($url);
 
-    exit(0);
+    if ($response === false) {
+        fwrite(STDERR, "Could not reach {$url}. Our connectivity is not evidence of a retirement.\n");
+
+        exit(0);
+    }
+
+    preg_match_all('/(?<![0-9a-z.\-])(?:gemini|imagen|veo)-[0-9a-z][0-9a-z.\-]*(?<![.\-])/i', $response, $found);
+    $served = array_values(array_unique(array_merge($served, $found[0])));
 }
 
-preg_match_all('/\b(?:gemini|imagen|veo)-[0-9][0-9a-z.\-]*/i', $response, $found);
-$served = array_values(array_unique($found[0]));
-
 if (count($served) < 5) {
-    fwrite(STDERR, "The published list parsed to almost nothing, which means the page format changed.\n");
+    fwrite(STDERR, "The published lists parsed to almost nothing, which means the page format changed.\n");
 
     exit(0);
 }

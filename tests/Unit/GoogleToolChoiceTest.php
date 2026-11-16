@@ -28,7 +28,7 @@ class TestableGoogleToolChoiceProvider extends GoogleProvider
     {
         $this->lastPayload = $payload;
 
-        return ['candidates' => [['content' => ['parts' => [['text' => 'ok']]], 'finishReason' => 'STOP']]];
+        return ['status' => 'completed', 'steps' => [['type' => 'model_output', 'content' => [['type' => 'text', 'text' => 'ok']]]], 'usage' => []];
     }
 }
 
@@ -41,37 +41,37 @@ describe('GoogleProvider tool choice', function () {
     });
 
     $callConfig = function ($provider) {
-        return $provider->lastPayload['toolConfig']['functionCallingConfig'] ?? null;
+        return $provider->lastPayload['generation_config']['tool_choice'] ?? null;
     };
 
-    it('maps auto to AUTO', function () use ($callConfig) {
+    it('maps auto to auto', function () use ($callConfig) {
         $this->provider->chat([Message::user('hi')], ['tools' => $this->tools, 'toolChoice' => 'auto']);
 
-        expect($callConfig($this->provider))->toBe(['mode' => 'AUTO']);
+        expect($callConfig($this->provider))->toBe('auto');
     });
 
-    it('maps none to NONE', function () use ($callConfig) {
+    it('maps none to none', function () use ($callConfig) {
         $this->provider->chat([Message::user('hi')], ['tools' => $this->tools, 'toolChoice' => 'none']);
 
-        expect($callConfig($this->provider))->toBe(['mode' => 'NONE']);
+        expect($callConfig($this->provider))->toBe('none');
     });
 
-    it('maps required to ANY without allowedFunctionNames', function () use ($callConfig) {
+    it('maps required to any', function () use ($callConfig) {
         $this->provider->chat([Message::user('hi')], ['tools' => $this->tools, 'toolChoice' => 'required']);
 
-        expect($callConfig($this->provider))->toBe(['mode' => 'ANY']);
+        expect($callConfig($this->provider))->toBe('any');
     });
 
-    it('maps a specific tool to ANY + allowedFunctionNames', function () use ($callConfig) {
+    it('maps a specific tool to allowed_tools', function () use ($callConfig) {
         $this->provider->chat([Message::user('hi')], ['tools' => $this->tools, 'toolChoice' => ['name' => 'get_weather']]);
 
-        expect($callConfig($this->provider))->toBe(['mode' => 'ANY', 'allowedFunctionNames' => ['get_weather']]);
+        expect($callConfig($this->provider))->toBe(['allowed_tools' => ['mode' => 'any', 'tools' => ['get_weather']]]);
     });
 
-    it('emits no toolConfig when toolChoice is absent (backward compatible)', function () {
+    it('emits no tool_choice when toolChoice is absent', function () {
         $this->provider->chat([Message::user('hi')], ['tools' => $this->tools]);
 
-        expect($this->provider->lastPayload)->not->toHaveKey('toolConfig');
+        expect($this->provider->lastPayload['generation_config'])->not->toHaveKey('tool_choice');
     });
 
     it('throws for required with no tools, before any HTTP call', function () {

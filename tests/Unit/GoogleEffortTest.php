@@ -27,7 +27,7 @@ class TestableGoogleEffortProvider extends GoogleProvider
     {
         $this->lastPayload = $payload;
 
-        return ['candidates' => [['content' => ['parts' => [['text' => 'ok']]], 'finishReason' => 'STOP']]];
+        return ['status' => 'completed', 'steps' => [['type' => 'model_output', 'content' => [['type' => 'text', 'text' => 'ok']]]], 'usage' => []];
     }
 }
 
@@ -35,89 +35,60 @@ describe('GoogleProvider reasoning effort', function () {
     beforeEach(function () {
         $this->provider = new TestableGoogleEffortProvider('test-api-key');
         $this->chat = fn (array $options) => $this->provider->chat([Message::user('hi')], $options);
-        $this->thinking = fn () => $this->provider->lastPayload['generationConfig']['thinkingConfig'] ?? [];
+        $this->level = fn () => $this->provider->lastPayload['generation_config']['thinking_level'] ?? null;
     });
 
-    describe('Gemini 3, which takes a thinking level', function () {
-        it('uses the level knob, never the budget one', function () {
-            // Sending both is an error, and a budget on Gemini 3 Pro is documented as unreliable.
-            ($this->chat)(['effort' => 'medium', 'model' => 'gemini-3-flash-preview']);
-
-            expect(($this->thinking)())->toHaveKey('thinkingLevel');
-            expect(($this->thinking)())->not->toHaveKey('thinkingBudget');
-        });
-
-        it('carries all four levels, not just two', function () {
+    describe('thinking_level, which every text model takes on Interactions', function () {
+        it('carries all four levels on a Flash that offers them', function () {
             $levels = [];
 
             foreach (['minimal', 'low', 'medium', 'high'] as $level) {
-                ($this->chat)(['effort' => $level, 'model' => 'gemini-3-flash-preview']);
-                $levels[] = ($this->thinking)()['thinkingLevel'];
+                ($this->chat)(['effort' => $level, 'model' => 'gemini-3.6-flash']);
+                $levels[] = ($this->level)();
             }
 
             expect($levels)->toBe(['minimal', 'low', 'medium', 'high']);
         });
 
         it('has no off switch, so none becomes the shallowest level available', function () {
-            // Gemini 3 cannot disable thinking. MINIMAL is the closest, and does not guarantee it.
-            ($this->chat)(['effort' => 'none', 'model' => 'gemini-3-flash-preview']);
+            ($this->chat)(['effort' => 'none', 'model' => 'gemini-3.6-flash']);
 
-            expect(($this->thinking)()['thinkingLevel'])->toBe('minimal');
+            expect(($this->level)())->toBe('minimal');
         });
 
-        it('keeps 3.1 Pro off MINIMAL, which it does not accept', function () {
-            foreach (['none', 'minimal'] as $level) {
-                ($this->chat)(['effort' => $level, 'model' => 'gemini-3.1-pro']);
+        it('keeps the models without MINIMAL at LOW', function () {
+            foreach (['gemini-3.8-flash', 'gemini-3.1-pro-preview', 'gemini-4-carbon', 'gemini-2.5-flash'] as $model) {
+                ($this->chat)(['effort' => 'none', 'model' => $model]);
 
-                expect(($this->thinking)()['thinkingLevel'])->toBe('low');
+                expect(($this->level)())->toBe('low', $model);
             }
         });
 
-        it('narrows the levels above what Gemini offers', function () {
-            foreach (['extra-high', 'maximum'] as $level) {
-                ($this->chat)(['effort' => $level, 'model' => 'gemini-3-flash-preview']);
+        it('gives Hydrogen xhigh, the only Gemini that takes it', function () {
+            ($this->chat)(['effort' => 'extra-high', 'model' => 'gemini-4-hydrogen']);
+            expect(($this->level)())->toBe('xhigh');
 
-                expect(($this->thinking)()['thinkingLevel'])->toBe('high');
-            }
-        });
-    });
-
-    describe('Gemini 2.5, which takes a thinking budget', function () {
-        it('sets a budget that grows with effort', function () {
-            $budgets = [];
-
-            foreach (['low', 'medium', 'high'] as $level) {
-                ($this->chat)(['effort' => $level, 'model' => 'gemini-2.5-flash', 'maxTokens' => 20_000]);
-                $budgets[] = ($this->thinking)()['thinkingBudget'];
-            }
-
-            expect($budgets[0])->toBeLessThan($budgets[1]);
-            expect($budgets[1])->toBeLessThan($budgets[2]);
+            ($this->chat)(['effort' => 'extra-high', 'model' => 'gemini-4-carbon']);
+            expect(($this->level)())->toBe('high');
         });
 
-        it('stays inside the range Gemini accepts, however large the ceiling', function () {
-            ($this->chat)(['effort' => 'maximum', 'model' => 'gemini-2.5-pro', 'maxTokens' => 200_000]);
+        it('sends no level for none on 2.5 Flash-Lite, which is off by default', function () {
+            ($this->chat)(['effort' => 'none', 'model' => 'gemini-2.5-flash-lite']);
 
-            expect(($this->thinking)()['thinkingBudget'])->toBeLessThanOrEqual(32_768);
+            expect(($this->level)())->toBeNull();
         });
 
-        it('disables thinking on Flash, which is the only family that can', function () {
-            ($this->chat)(['effort' => 'none', 'model' => 'gemini-2.5-flash']);
+        it('assumes the three middle levels for a model it has not heard of', function () {
+            ($this->chat)(['effort' => 'maximum', 'model' => 'gemini-5-flash']);
 
-            expect(($this->thinking)()['thinkingBudget'])->toBe(0);
-        });
-
-        it('keeps 2.5 Pro above its floor, since it cannot disable thinking', function () {
-            ($this->chat)(['effort' => 'none', 'model' => 'gemini-2.5-pro']);
-
-            expect(($this->thinking)()['thinkingBudget'])->toBeGreaterThanOrEqual(128);
+            expect(($this->level)())->toBe('high');
         });
     });
 
     it('sends nothing when the caller does not ask', function () {
         ($this->chat)(['model' => 'gemini-2.5-pro']);
 
-        expect($this->provider->lastPayload['generationConfig'])->not->toHaveKey('thinkingConfig');
+        expect($this->provider->lastPayload['generation_config'])->not->toHaveKey('thinking_level');
     });
 
     it('rejects a level it does not recognise', function () {
@@ -126,12 +97,12 @@ describe('GoogleProvider reasoning effort', function () {
     });
 
     it('accepts a provider-level default the call can override', function () {
-        $provider = new TestableGoogleEffortProvider('k', 'gemini-3-flash-preview', 8192, Effort::High);
+        $provider = new TestableGoogleEffortProvider('k', 'gemini-3.6-flash', 8192, Effort::High);
 
         $provider->chat([Message::user('hi')], []);
-        expect($provider->lastPayload['generationConfig']['thinkingConfig']['thinkingLevel'])->toBe('high');
+        expect($provider->lastPayload['generation_config']['thinking_level'])->toBe('high');
 
         $provider->chat([Message::user('hi')], ['effort' => 'low']);
-        expect($provider->lastPayload['generationConfig']['thinkingConfig']['thinkingLevel'])->toBe('low');
+        expect($provider->lastPayload['generation_config']['thinking_level'])->toBe('low');
     });
 });

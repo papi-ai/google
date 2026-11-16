@@ -32,9 +32,14 @@ use PapiAI\Core\Effort;
  */
 enum GeminiModel: string
 {
+    case Carbon4 = 'gemini-4-carbon';
+    case Argon4 = 'gemini-4-argon';
+    case Hydrogen4 = 'gemini-4-hydrogen';
     case Flash38 = 'gemini-3.8-flash';
+    /** @deprecated No longer published by Google. Use Flash38. */
     case Flash37 = 'gemini-3.7-flash';
     case Flash36 = 'gemini-3.6-flash';
+    /** @deprecated No longer published by Google. Use Flash38. */
     case Flash35 = 'gemini-3.5-flash';
     case Flash35Lite = 'gemini-3.5-flash-lite';
     case Pro31 = 'gemini-3.1-pro-preview';
@@ -52,10 +57,13 @@ enum GeminiModel: string
     /** @deprecated Retired; no longer published by Google. */
     case Flash15 = 'gemini-1.5-flash';
 
+    case NanoBanana21 = 'gemini-nano-banana-2.1';
     case Flash31Image = 'gemini-3.1-flash-image';
     case Flash31LiteImage = 'gemini-3.1-flash-lite-image';
     case Pro3Image = 'gemini-3-pro-image';
     case Flash25Image = 'gemini-2.5-flash-image';
+    case Embedding2 = 'gemini-embedding-2';
+    case Embedding001 = 'gemini-embedding-001';
     /** @deprecated Imagen shut down 17 August 2026. Use Flash31Image. */
     case Imagen4 = 'imagen-4.0-generate-001';
     /** @deprecated Imagen shut down 17 August 2026. Use Flash31Image. */
@@ -73,50 +81,44 @@ enum GeminiModel: string
     case Veo2 = 'veo-2.0-generate-001';
 
     /**
-     * Whether this model takes a thinking level (Gemini 3 and later) rather than a token budget.
+     * The thinking levels this model accepts on the Interactions API, in the neutral vocabulary.
      *
-     * Google warns that the budget knob behaves unpredictably on Gemini 3 Pro, so the level knob
-     * is always used from 3 on.
-     */
-    public function takesThinkingLevel(): bool
-    {
-        return match ($this) {
-            self::Flash38, self::Flash37, self::Flash36, self::Flash35, self::Flash35Lite,
-            self::Pro31, self::Flash31Lite, self::Flash3, self::Pro3 => true,
-            default => false,
-        };
-    }
-
-    /**
-     * The thinking levels this model accepts, in the neutral vocabulary.
-     *
-     * Only meaningful for models that take a level. No Gemini 3 model can switch thinking off,
-     * and Pro does not accept MINIMAL at all, so its floor is LOW. Budget models return an empty
-     * list: their knob is continuous.
+     * Every text model takes a level there, the 2.5 generation included. Empty for the image,
+     * video and retired models.
      *
      * @return list<Effort>
      */
     public function effortLevels(): array
     {
-        if (!$this->takesThinkingLevel()) {
-            return [];
-        }
-
         return match ($this) {
-            self::Pro31, self::Pro3 => [Effort::Low, Effort::Medium, Effort::High],
-            default => [Effort::Minimal, Effort::Low, Effort::Medium, Effort::High],
+            self::Hydrogen4 => [Effort::Low, Effort::Medium, Effort::High, Effort::ExtraHigh],
+            self::Carbon4, self::Argon4, self::Flash38, self::Pro31,
+            self::Pro25, self::Flash25, self::Flash25Lite => [Effort::Low, Effort::Medium, Effort::High],
+            self::Pro3 => [Effort::Low, Effort::High],
+            self::Flash37, self::Flash36, self::Flash35, self::Flash35Lite, self::Flash31Lite,
+            self::Flash3 => [Effort::Minimal, Effort::Low, Effort::Medium, Effort::High],
+            default => [],
         };
     }
 
     /**
-     * Whether a zero budget genuinely disables thinking. Only the pre-3 Flash families can;
-     * Pro has a floor it will not go below.
+     * Whether thinking is off unless a level is sent. Only 2.5 Flash-Lite, where "none" means
+     * sending nothing.
      */
-    public function canDisableThinking(): bool
+    public function thinksByDefault(): bool
+    {
+        return $this !== self::Flash25Lite;
+    }
+
+    /**
+     * Whether `temperature` is honoured. Gemini 3.6 and later, Gemini 4 included, ignore it and
+     * return a deprecation header, so sending it is refused before the request.
+     */
+    public function acceptsSampling(): bool
     {
         return match ($this) {
-            self::Flash25, self::Flash25Lite, self::Flash20, self::Flash20Lite, self::Flash15 => true,
-            default => false,
+            self::Carbon4, self::Argon4, self::Hydrogen4, self::Flash38, self::Flash37, self::Flash36 => false,
+            default => true,
         };
     }
 
@@ -126,7 +128,7 @@ enum GeminiModel: string
     public function isDeprecated(): bool
     {
         return match ($this) {
-            self::Pro3, self::Pro15, self::Flash15,
+            self::Pro3, self::Pro15, self::Flash15, self::Flash35, self::Flash37,
             self::Imagen4, self::Imagen4Ultra, self::Imagen4Fast, self::ImagenEdit,
             self::Veo3, self::Veo2 => true,
             default => false,
