@@ -44,14 +44,18 @@ use RuntimeException;
  * tool calling with thought signatures, vision (multimodal), structured JSON output, image
  * generation and editing, video generation via Veo, and text embeddings.
  *
- * Authentication is via API key passed as a query parameter. All HTTP is done with ext-curl
- * directly, with no HTTP abstraction layer.
+ * Chat, streaming, tools, structured output and image generation go through the Interactions
+ * API; embeddings and Veo keep their own endpoints. Authentication is the x-goog-api-key header.
+ * All HTTP is done with ext-curl directly, with no HTTP abstraction layer.
  *
  * Supported model families:
  *
- * Gemini 3.x (Latest):
- *   - gemini-3.6-flash, gemini-3.5-flash, gemini-3.5-flash-lite
- *   - gemini-3.1-pro, gemini-3-flash
+ * Gemini 4:
+ *   - gemini-4-carbon, gemini-4-argon, gemini-4-hydrogen
+ *
+ * Gemini 3.x:
+ *   - gemini-3.8-flash, gemini-3.6-flash, gemini-3.5-flash-lite
+ *   - gemini-3.1-pro-preview, gemini-3.1-flash-lite, gemini-3-flash-preview
  *
  * Gemini 2.x:
  *   - gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite
@@ -72,22 +76,22 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
 {
     private const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta';
     private const API_BASE = self::API_ROOT . '/models';
+    private const INTERACTIONS_URL = self::API_ROOT . '/interactions';
 
     /**
-     * Floor for a pre-3 thinking budget. Gemini 2.5 Pro will not go below this and cannot be
-     * switched off at all.
+     * Google's own spelling for the one thinking level whose neutral name differs.
      */
-    private const MIN_THINKING_BUDGET = 128;
-
-    /**
-     * Ceiling for a pre-3 thinking budget, well under the output ceiling of a large request.
-     */
-    private const MAX_THINKING_BUDGET = 32768;
+    private const NATIVE_LEVEL = ['extra-high' => 'xhigh'];
 
     // Gemini model aliases
+    public const MODEL_4_CARBON = GeminiModel::Carbon4->value;
+    public const MODEL_4_ARGON = GeminiModel::Argon4->value;
+    public const MODEL_4_HYDROGEN = GeminiModel::Hydrogen4->value;
     public const MODEL_3_8_FLASH = GeminiModel::Flash38->value;
+    /** @deprecated No longer published by Google. Use MODEL_3_8_FLASH. */
     public const MODEL_3_7_FLASH = GeminiModel::Flash37->value;
     public const MODEL_3_6_FLASH = GeminiModel::Flash36->value;
+    /** @deprecated No longer published by Google. Use MODEL_3_8_FLASH. */
     public const MODEL_3_5_FLASH = GeminiModel::Flash35->value;
     public const MODEL_3_5_FLASH_LITE = GeminiModel::Flash35Lite->value;
     public const MODEL_3_1_PRO = GeminiModel::Pro31->value;
@@ -108,9 +112,12 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
 
     // Image generation and editing, all reached through generateContent. Imagen is retired as a
     // product line and its separate predict endpoint went with it; these replace both.
+    public const MODEL_NANO_BANANA_2_1 = GeminiModel::NanoBanana21->value;
     public const MODEL_3_1_FLASH_IMAGE = GeminiModel::Flash31Image->value;
     public const MODEL_3_1_FLASH_LITE_IMAGE = GeminiModel::Flash31LiteImage->value;
     public const MODEL_2_5_FLASH_IMAGE = GeminiModel::Flash25Image->value;
+    public const MODEL_EMBEDDING_2 = GeminiModel::Embedding2->value;
+    public const MODEL_EMBEDDING_001 = GeminiModel::Embedding001->value;
 
     /** @deprecated Imagen shuts down 17 August 2026. Use MODEL_3_1_FLASH_IMAGE. */
     public const IMAGEN_4 = GeminiModel::Imagen4->value;
@@ -129,8 +136,16 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     /** @deprecated Shut down 30 June 2026; requests fail. Use MODEL_VEO_3_1. */
     public const MODEL_VEO_2 = GeminiModel::Veo2->value;
 
-    /** @var array<string, string> tool call ID to thought signature mapping for multi-turn tool use */
-    private array $thoughtSignatures = [];
+    /**
+     * The model steps of each turn that called tools, keyed by call id, so the next request can
+     * replay them exactly as received. Interactions requires that in stateless mode.
+     *
+     * @var array<string, list<array<string, mixed>>>
+     */
+    private array $turnSteps = [];
+
+    /** @var array<string, string> tool name by call id, which a function_result item must name */
+    private array $callNames = [];
 
     /**
      * Create a new Google Gemini provider instance.
@@ -149,61 +164,47 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Send a chat completion request to the Gemini API.
+     * Send a conversation to the Interactions API and return the model's turn.
      *
-     * Converts PapiAI Messages to Gemini's content format, sends the request,
-     * and parses the response back into a core Response object. Supports tools,
-     * vision, structured output, and custom generation parameters.
-     *
-     * @param array<Message> $messages Conversation history as PapiAI Message objects
-     * @param ChatOptions     $options  Request options (model, tools, maxTokens, temperature, toolChoice, etc.)
-     *
-     * @return Response Parsed response containing text, tool calls, usage, and stop reason
+     * @param array<Message> $messages Conversation history
+     * @param ChatOptions     $options  Request options (model, tools, maxTokens, temperature, toolChoice, effort, outputSchema)
      *
      * @throws AuthenticationException When the API key is invalid (HTTP 401)
      * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
-     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws ProviderException       When the API returns any other error, or a request option cannot be honoured
      * @throws RuntimeException        When the cURL request itself fails
      */
     public function chat(array $messages, array $options = []): Response
     {
-        $model = $options['model'] ?? $this->defaultModel;
-        $payload = $this->buildPayload($messages, $options);
-
-        $response = $this->request($this->generateContentUrl($model), $payload);
+        $response = $this->request($this->interactionsUrl(), $this->buildPayload($messages, $options));
 
         return $this->parseResponse($response, $messages);
     }
 
     /**
-     * Stream a chat completion from the Gemini API using server-sent events.
+     * Stream an interaction, yielding text deltas and a final completion marker.
      *
-     * Yields StreamChunk objects as partial responses arrive. The final chunk
-     * has isComplete=true. Only text content is streamed; tool calls are not
-     * supported in streaming mode.
+     * @param array<Message> $messages Conversation history
+     * @param array<array-key, mixed> $options Request options
      *
-     * @param array<Message> $messages Conversation history as PapiAI Message objects
-     * @param array<array-key, mixed> $options Request options (model, tools, maxTokens, temperature, etc.)
-     *
-     * @return iterable<StreamChunk> Stream of text chunks, ending with a completion marker
-     *
-     * @throws RuntimeException When the cURL request fails
+     * @return iterable<StreamChunk>
      */
     public function stream(array $messages, array $options = []): iterable
     {
-        $model = $options['model'] ?? $this->defaultModel;
         $payload = $this->buildPayload($messages, $options);
+        $payload['stream'] = true;
 
-        $url = self::API_BASE . "/{$model}:streamGenerateContent?key={$this->apiKey}&alt=sse";
+        foreach ($this->streamRequest($this->interactionsUrl() . '?alt=sse', $payload) as $event) {
+            $type = $event['event_type'] ?? '';
 
-        foreach ($this->streamRequest($url, $payload) as $event) {
-            $text = $this->extractTextFromCandidate($event);
-            if ($text !== '') {
-                yield new StreamChunk($text);
+            if ($type === 'step.delta' && ($event['delta']['type'] ?? '') === 'text') {
+                yield new StreamChunk((string) ($event['delta']['text'] ?? ''));
+            }
+
+            if ($type === 'interaction.completed' || $type === 'error') {
+                yield new StreamChunk('', isComplete: true);
             }
         }
-
-        yield new StreamChunk('', isComplete: true);
     }
 
     /**
@@ -222,7 +223,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     /**
      * Whether this provider supports vision (image inputs in messages).
      *
-     * Gemini natively handles images via inlineData (base64) and fileData (URLs).
+     * Images travel inline as base64 image parts; URLs are fetched first.
      *
      * @return bool Always true for Google Gemini
      */
@@ -283,7 +284,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     /**
      * Generate images from a text prompt using Gemini's native image models.
      *
-     * Goes through generateContent, asking for an image modality back. Imagen's separate
+     * Goes through the Interactions API, asking for an image back through response_format. Imagen's separate
      * predict endpoint is gone: the whole Imagen line shuts down on 17 August 2026 and the
      * Gemini image models that replace it do not speak that endpoint.
      *
@@ -320,7 +321,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         }
 
         $result = $this->requestImage(
-            [['text' => $prompt]],
+            [['type' => 'text', 'text' => $prompt]],
             $options['model'] ?? self::MODEL_3_1_FLASH_IMAGE,
             $options,
         );
@@ -360,13 +361,8 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
         }
 
         $parts = [
-            [
-                'inlineData' => [
-                    'mimeType' => $this->detectMimeType($imageUrl, $imageData),
-                    'data' => base64_encode($imageData),
-                ],
-            ],
-            ['text' => $prompt],
+            ['type' => 'image', 'mime_type' => $this->detectMimeType($imageUrl, $imageData), 'data' => base64_encode($imageData)],
+            ['type' => 'text', 'text' => $prompt],
         ];
 
         return $this->requestImage($parts, $options['model'] ?? self::MODEL_3_PRO_IMAGE, $options);
@@ -375,50 +371,39 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     /**
      * Ask a Gemini image model for an image and parse what comes back.
      *
-     * Generation and editing differ only in the parts they send, so the wire format for both
-     * lives here: image output is opt-in through responseModalities, and the shape and size
-     * knobs sit in imageConfig.
+     * Generation and editing differ only in the parts they send. Image output is requested
+     * through response_format, which also carries the shape and size knobs.
      *
-     * @param array<array<string, mixed>> $parts   The content parts, text alone or an image and text
-     * @param string                      $model   The image model to call
-     * @param array<string, mixed>        $options The caller's options, read for aspectRatio and imageSize
+     * @param list<array<string, mixed>> $parts   The content parts, text alone or an image and text
+     * @param string                     $model   The image model to call
+     * @param array<string, mixed>       $options The caller's options, read for aspectRatio and imageSize
      *
-     * @return array{images: array<array{mimeType: string, data: string}>, text: string} Images and any descriptive text
-     *
-     * @throws AuthenticationException When the API key is invalid (HTTP 401)
-     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
-     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
-     * @throws RuntimeException        When the cURL request itself fails
+     * @return array{images: array<array{mimeType: string, data: string}>, text: string}
      */
     private function requestImage(array $parts, string $model, array $options): array
     {
-        $generationConfig = ['responseModalities' => ['TEXT', 'IMAGE']];
-
-        // Only sent when asked for. Inventing a 1:1 default used to reshape whatever the
-        // caller passed in, which is the same mistake as the Agent's invented temperature.
-        $imageConfig = array_filter([
-            'aspectRatio' => $options['aspectRatio'] ?? null,
-            'imageSize' => $options['imageSize'] ?? null,
+        $format = array_filter([
+            'type' => 'image',
+            'aspect_ratio' => $options['aspectRatio'] ?? null,
+            'image_size' => $options['imageSize'] ?? null,
         ], static fn ($value) => $value !== null);
 
-        if ($imageConfig !== []) {
-            $generationConfig['imageConfig'] = $imageConfig;
-        }
-
-        $response = $this->request($this->generateContentUrl($model), [
-            'contents' => [['parts' => $parts]],
-            'generationConfig' => $generationConfig,
+        $response = $this->request($this->interactionsUrl(), [
+            'model' => $model,
+            'store' => false,
+            'input' => [['type' => 'user_input', 'content' => $parts]],
+            'response_format' => $format,
         ]);
 
         return $this->parseImageResponse($response);
     }
 
     /**
-     * The generateContent endpoint for a model, with the API key Google expects on the query string.
+     * The Interactions endpoint. Protected so a test double can observe it.
      */
-    private function generateContentUrl(string $model): string
+    protected function interactionsUrl(): string
     {
-        return self::API_BASE . "/{$model}:generateContent?key={$this->apiKey}";
+        return self::INTERACTIONS_URL;
     }
 
     /**
@@ -789,7 +774,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      * @param array{
      *     model?: string,
      *     dimensions?: int,
-     * } $options Provider-specific options (defaults: model=text-embedding-004)
+     * } $options Provider-specific options (defaults: model=gemini-embedding-2, dimensions=3072)
      *
      * @return EmbeddingResponse Embedding vectors and model metadata
      *
@@ -800,80 +785,112 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
      */
     public function embed(string|array $input, array $options = []): EmbeddingResponse
     {
-        $model = $options['model'] ?? 'text-embedding-004';
+        $model = $options['model'] ?? self::MODEL_EMBEDDING_2;
+        $dimensions = $options['dimensions'] ?? null;
         $inputs = is_array($input) ? $input : [$input];
 
         if (count($inputs) === 1) {
             $url = self::API_BASE . "/{$model}:embedContent?key={$this->apiKey}";
-            $payload = [
-                'model' => "models/{$model}",
-                'content' => [
-                    'parts' => [['text' => $inputs[0]]],
-                ],
-            ];
+            $response = $this->embeddingRequest($this->embeddingRequestFor($model, $inputs[0], $dimensions), $url);
 
-            $response = $this->embeddingRequest($payload, $url);
-
-            return new EmbeddingResponse(
-                embeddings: [$response['embedding']['values']],
-                model: $model,
-            );
+            return new EmbeddingResponse(embeddings: [$response['embedding']['values']], model: $model);
         }
 
         $url = self::API_BASE . "/{$model}:batchEmbedContents?key={$this->apiKey}";
         $requests = [];
+
         foreach ($inputs as $text) {
-            $requests[] = [
-                'model' => "models/{$model}",
-                'content' => [
-                    'parts' => [['text' => $text]],
-                ],
-            ];
+            $requests[] = $this->embeddingRequestFor($model, $text, $dimensions);
         }
 
         $response = $this->embeddingRequest(['requests' => $requests], $url);
-
         $embeddings = [];
+
         foreach ($response['embeddings'] as $embedding) {
             $embeddings[] = $embedding['values'];
         }
 
-        return new EmbeddingResponse(
-            embeddings: $embeddings,
-            model: $model,
-        );
+        return new EmbeddingResponse(embeddings: $embeddings, model: $model);
     }
 
     /**
-     * Parse a Gemini image generation/editing response into a normalized format.
+     * One embedContent request, with the output size when the caller asks for one.
      *
-     * Filters out intermediate "thought" images (parts with thought=true) that
-     * represent the model's internal reasoning, keeping only final output images
-     * and any accompanying text.
+     * @return array<string, mixed>
+     */
+    private function embeddingRequestFor(string $model, string $text, ?int $dimensions): array
+    {
+        $request = ['model' => "models/{$model}", 'content' => ['parts' => [['text' => $text]]]];
+
+        if ($dimensions !== null) {
+            $request['outputDimensionality'] = $dimensions;
+        }
+
+        return $request;
+    }
+
+    /**
+     * Usage in core's vocabulary. Interactions counts thought tokens apart from the visible
+     * output; both are output tokens for billing, so they are summed here as every other provider
+     * already reports them.
      *
-     * @param array $response Raw decoded JSON response from the Gemini API
+     * @param array<string, mixed> $usage
      *
-     * @return array{images: array<array{mimeType: string, data: string}>, text: string} Extracted images and text
+     * @return array<string, int>
+     */
+    private function usageOf(array $usage): array
+    {
+        $normalised = [
+            'input_tokens' => (int) ($usage['total_input_tokens'] ?? 0),
+            'output_tokens' => (int) ($usage['total_output_tokens'] ?? 0) + (int) ($usage['total_thought_tokens'] ?? 0),
+        ];
+
+        if (isset($usage['total_tokens'])) {
+            $normalised['total_tokens'] = (int) $usage['total_tokens'];
+        }
+
+        return $normalised;
+    }
+
+    /**
+     * "stop" for a finished turn, "tool_calls" when the model wants tools run, otherwise the
+     * status Google reported, which is "incomplete" when the output ceiling cut the turn short.
+     *
+     * @param array<string, mixed> $response
+     */
+    private function stopReasonOf(array $response, bool $calledTools): string
+    {
+        if ($calledTools) {
+            return 'tool_calls';
+        }
+
+        $status = (string) ($response['status'] ?? 'completed');
+
+        return $status === 'completed' ? 'stop' : $status;
+    }
+
+    /**
+     * Images and text from the model_output steps of an interaction.
+     *
+     * @param array<string, mixed> $response Raw decoded body
+     *
+     * @return array{images: array<array{mimeType: string, data: string}>, text: string}
      */
     private function parseImageResponse(array $response): array
     {
         $images = [];
         $text = '';
 
-        foreach ($response['candidates'] ?? [] as $candidate) {
-            foreach ($candidate['content']['parts'] ?? [] as $part) {
-                // Skip intermediate thought images
-                if (!empty($part['thought'])) {
-                    continue;
-                }
+        foreach ($response['steps'] ?? [] as $step) {
+            if (($step['type'] ?? '') !== 'model_output') {
+                continue;
+            }
 
-                if (isset($part['inlineData'])) {
-                    $images[] = [
-                        'mimeType' => $part['inlineData']['mimeType'] ?? 'image/png',
-                        'data' => $part['inlineData']['data'],
-                    ];
-                } elseif (isset($part['text'])) {
-                    $text .= $part['text'];
+            foreach ($step['content'] ?? [] as $part) {
+                if (($part['type'] ?? '') === 'image' && isset($part['data'])) {
+                    $images[] = ['mimeType' => $part['mime_type'] ?? 'image/png', 'data' => $part['data']];
+                } elseif (($part['type'] ?? '') === 'text') {
+                    $text .= $part['text'] ?? '';
                 }
             }
         }
@@ -983,101 +1000,166 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Build the Gemini API request payload from messages and options.
+     * Build the Interactions request body.
      *
-     * Converts the PapiAI message array into Gemini's contents format, extracts
-     * system instructions into a separate field, and applies generation config
-     * options (maxTokens, temperature, stop sequences, JSON schema, tools).
+     * The history travels in full on every request (`store: false`): papi owns the transcript,
+     * Google does not keep one.
      *
-     * @param array<Message> $messages Conversation messages to convert
-     * @param ChatOptions $options Request options controlling generation behavior
+     * @param array<Message> $messages
+     * @param ChatOptions    $options
      *
-     * @return array The complete Gemini API payload ready for JSON encoding
+     * @return array<string, mixed>
      */
     private function buildPayload(array $messages, array $options): array
     {
-        $contents = [];
-        $systemInstruction = null;
+        $model = (string) ($options['model'] ?? $this->defaultModel);
+        [$instruction, $input] = $this->splitConversation($messages);
+
+        $payload = ['model' => $model, 'store' => false, 'input' => $input];
+
+        if ($instruction !== null) {
+            $payload['system_instruction'] = $instruction;
+        }
+
+        if (isset($options['outputSchema'])) {
+            $payload['response_format'] = ['type' => 'text', 'mime_type' => 'application/json', 'schema' => $options['outputSchema']];
+        }
+
+        if (!empty($options['tools'])) {
+            $payload['tools'] = $this->convertTools($options['tools']);
+        }
+
+        $payload['generation_config'] = $this->generationConfig($model, $options);
+
+        return $payload;
+    }
+
+    /**
+     * The system message, which Interactions takes as `system_instruction`, and everything else
+     * as input items.
+     *
+     * @param array<Message> $messages
+     *
+     * @return array{0: string|null, 1: list<array<string, mixed>>}
+     */
+    private function splitConversation(array $messages): array
+    {
+        $instruction = null;
+        $input = [];
 
         foreach ($messages as $message) {
-            if ($message instanceof Message) {
-                if ($message->isSystem()) {
-                    $systemInstruction = $message->getText();
-                    continue;
-                }
+            if (!$message instanceof Message) {
+                continue;
+            }
 
-                $contents[] = $this->convertMessage($message);
+            if ($message->isSystem()) {
+                $instruction = $message->getText();
+
+                continue;
+            }
+
+            foreach ($this->toInputItems($message) as $item) {
+                $input[] = $item;
             }
         }
 
-        $payload = [
-            'contents' => $contents,
-            'generationConfig' => [
-                'maxOutputTokens' => $options['maxTokens'] ?? $this->defaultMaxTokens,
-            ],
-        ];
+        return [$instruction, $input];
+    }
 
-        if ($systemInstruction !== null) {
-            $payload['systemInstruction'] = [
-                'parts' => [['text' => $systemInstruction]],
-            ];
-        }
+    /**
+     * The generation_config block: output ceiling, sampling, stop sequences, forced tool choice
+     * and thinking level.
+     *
+     * @return array<string, mixed>
+     */
+    private function generationConfig(string $model, array $options): array
+    {
+        $config = ['max_output_tokens' => $options['maxTokens'] ?? $this->defaultMaxTokens];
 
         if (isset($options['temperature'])) {
-            $payload['generationConfig']['temperature'] = $options['temperature'];
+            $this->assertAcceptsSampling($model);
+            $config['temperature'] = $options['temperature'];
         }
 
         if (isset($options['stopSequences'])) {
-            $payload['generationConfig']['stopSequences'] = $options['stopSequences'];
+            $config['stop_sequences'] = $options['stopSequences'];
         }
 
-        // Handle structured output / JSON mode
-        if (isset($options['outputSchema'])) {
-            $payload['generationConfig']['responseMimeType'] = 'application/json';
-            $payload['generationConfig']['responseSchema'] = $options['outputSchema'];
-        }
-
-        // Handle tools
-        if (isset($options['tools']) && !empty($options['tools'])) {
-            $payload['tools'] = [
-                ['functionDeclarations' => $this->convertTools($options['tools'])],
-            ];
-        }
-
-        // Handle forced tool choice. Validation lives in core and throws before any HTTP call.
+        // Validation lives in core and throws before any HTTP call, tools or no tools.
         if (isset($options['toolChoice'])) {
             $choice = ToolChoice::fromOption($options['toolChoice'], $options['tools'] ?? []);
 
             if (!empty($options['tools'])) {
-                $config = [
-                    'mode' => match ($choice->mode) {
-                        ToolChoice::NONE => 'NONE',
-                        ToolChoice::REQUIRED => 'ANY',
-                        default => 'AUTO',
-                    },
-                ];
-
-                if ($choice->toolName !== null) {
-                    $config['allowedFunctionNames'] = [$choice->toolName];
-                }
-
-                $payload['toolConfig'] = ['functionCallingConfig' => $config];
+                $config['tool_choice'] = $this->toolChoiceFor($choice);
             }
         }
 
-        // Reasoning effort maps to thinkingConfig, which has two knobs that must never both be
-        // sent: Gemini 3 and later take a thinking level, earlier models take a token budget.
         $effort = $this->effortFor($options);
 
         if ($effort !== null) {
-            $payload['generationConfig']['thinkingConfig'] = $this->thinkingConfigFor(
-                $effort,
-                (string) ($options['model'] ?? $this->defaultModel),
-                (int) $payload['generationConfig']['maxOutputTokens'],
-            );
+            $level = $this->thinkingLevelFor($effort, $model);
+
+            if ($level !== null) {
+                $config['thinking_level'] = $level;
+            }
         }
 
-        return $payload;
+        return $config;
+    }
+
+    /**
+     * Interactions takes the bare mode, or allowed_tools when one tool is named.
+     *
+     * @return array{allowed_tools: array{mode: string, tools: list<string>}}|string
+     */
+    private function toolChoiceFor(ToolChoice $choice): array|string
+    {
+        if ($choice->toolName !== null) {
+            return ['allowed_tools' => ['mode' => 'any', 'tools' => [$choice->toolName]]];
+        }
+
+        return match ($choice->mode) {
+            ToolChoice::NONE => 'none',
+            ToolChoice::REQUIRED => 'any',
+            default => 'auto',
+        };
+    }
+
+    /**
+     * The thinking_level for a level of effort, or null to send nothing.
+     *
+     * No Gemini model can be told to stop thinking through a level, so "none" narrows to the
+     * shallowest level the model offers. The one model that is off by default, 2.5 Flash-Lite,
+     * gets nothing for "none", which leaves it off.
+     */
+    private function thinkingLevelFor(Effort $effort, string $model): ?string
+    {
+        $known = GeminiModel::tryFrom($model);
+
+        if (!$effort->thinks() && $known !== null && !$known->thinksByDefault()) {
+            return null;
+        }
+
+        $level = $effort->nearestOf($this->levelsFor($model))->value;
+
+        return self::NATIVE_LEVEL[$level] ?? $level;
+    }
+
+    /**
+     * Refuse temperature on the models that ignore it and warn, rather than send a dead knob.
+     *
+     * @throws ProviderException When the model does not honour sampling parameters
+     */
+    private function assertAcceptsSampling(string $model): void
+    {
+        if (GeminiModel::tryFrom($model)?->acceptsSampling() ?? false) {
+            return;
+        }
+
+        throw new ProviderException(
+            sprintf('Model "%s" ignores "temperature": Gemini 3.6 and later return a deprecation warning for sampling parameters. Remove it and let the model use its own default.', $model),
+            $this->getName(),
+        );
     }
 
     /**
@@ -1099,34 +1181,8 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     }
 
     /**
-     * Build the thinkingConfig block for a level of effort.
-     *
-     * The two knobs are mutually exclusive and the API errors when both are sent, so exactly one
-     * comes back. Gemini 3 still accepts `thinkingBudget` for backwards compatibility, but Google
-     * warns it behaves unpredictably on Pro, so the level knob is always used there.
-     *
-     * @param Effort $effort    The level the caller asked for
-     * @param string $model     The model this request targets, which decides the knob
-     * @param int    $maxTokens The output ceiling this request will carry
-     *
-     * @return array{thinkingLevel: string}|array{thinkingBudget: int} One knob, never both
-     */
-    private function thinkingConfigFor(Effort $effort, string $model, int $maxTokens): array
-    {
-        if ($this->takesThinkingLevel($model)) {
-            // Lowercase, matching every REST example Google publishes.
-            return ['thinkingLevel' => $effort->nearestOf($this->levelsFor($model))->value];
-        }
-
-        return ['thinkingBudget' => $this->budgetFor($effort, $model, $maxTokens)];
-    }
-
-    /**
-     * The thinking levels a Gemini 3 model accepts.
-     *
-     * **No Gemini 3 model can switch thinking off**, so `Effort::None` narrows to the shallowest
-     * level on offer rather than disabling anything. Pro does not accept MINIMAL at all, so its
-     * floor is LOW.
+     * The thinking levels a model accepts. The model answers when we know it; an unknown ID is
+     * assumed to take the three middle levels, which every current generation does.
      *
      * @return non-empty-list<Effort>
      */
@@ -1134,118 +1190,73 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
     {
         $known = GeminiModel::tryFrom($model)?->effortLevels() ?? [];
 
-        if ($known !== []) {
-            return $known;
-        }
-
-        if (stripos($model, 'pro') !== false) {
-            return [Effort::Low, Effort::Medium, Effort::High];
-        }
-
-        return [Effort::Minimal, Effort::Low, Effort::Medium, Effort::High];
+        return $known !== [] ? $known : [Effort::Low, Effort::Medium, Effort::High];
     }
 
     /**
-     * The thinking budget a pre-3 Gemini model accepts.
+     * Translate one PapiAI message into Interactions input items.
      *
-     * Only the Flash families can genuinely disable thinking with a zero budget. Pro has a floor
-     * it will not go below, and every family has a ceiling well under a large maxTokens, so the
-     * neutral share is clamped into the range Gemini actually accepts.
+     * A user turn is a user_input item. An assistant turn that called tools is replayed as the
+     * model steps this instance received for it, exactly as received, which is what stateless
+     * mode requires; a turn it never saw is rebuilt from the message. A tool result is a
+     * function_result item naming the tool and the call.
+     *
+     * @return list<array<string, mixed>>
      */
-    private function budgetFor(Effort $effort, string $model, int $maxTokens): int
+    private function toInputItems(Message $message): array
     {
-        $canDisable = GeminiModel::tryFrom($model)?->canDisableThinking() ?? stripos($model, 'flash') !== false;
-
-        if (!$effort->thinks() && $canDisable) {
-            return 0;
-        }
-
-        $budget = max(self::MIN_THINKING_BUDGET, $effort->budgetWithin($maxTokens));
-
-        return min($budget, self::MAX_THINKING_BUDGET);
-    }
-
-    /**
-     * Whether this model wants a thinking level rather than a thinking budget.
-     *
-     * Decided from the model name because the API offers no way to ask.
-     */
-    private function takesThinkingLevel(string $model): bool
-    {
-        return GeminiModel::tryFrom($model)?->takesThinkingLevel()
-            ?? preg_match('/gemini-([3-9]|\d{2,})/i', $model) === 1;
-    }
-
-    /**
-     * Convert a single PapiAI Message into Gemini's content format.
-     *
-     * Handles all message types: tool responses (functionResponse), assistant
-     * messages with tool calls (functionCall with optional thoughtSignature),
-     * multimodal content (images + text), and plain text messages. Maps PapiAI
-     * roles to Gemini roles (User/Tool become "user", Assistant becomes "model").
-     *
-     * @param Message $message The PapiAI message to convert
-     *
-     * @return array Gemini content object with "role" and "parts" keys
-     */
-    private function convertMessage(Message $message): array
-    {
-        $role = match ($message->role) {
-            Role::User, Role::Tool => 'user',
-            Role::Assistant => 'model',
-            Role::System => 'user',
-        };
-
-        $parts = [];
-
         if ($message->isTool()) {
-            // Function response
-            $parts[] = [
-                'functionResponse' => [
-                    'name' => $message->toolCallId, // Gemini uses name, not ID
-                    'response' => ['result' => $message->content],
-                ],
-            ];
-        } elseif ($message->hasToolCalls()) {
-            // Model message with function calls
-            if ($message->getText() !== '') {
-                $parts[] = ['text' => $message->getText()];
-            }
-            foreach ($message->toolCalls as $toolCall) {
-                $part = [
-                    'functionCall' => [
-                        'name' => $toolCall->name,
-                        'args' => (object) $toolCall->arguments,
-                    ],
-                ];
-                if (isset($this->thoughtSignatures[$toolCall->id])) {
-                    $part['thoughtSignature'] = $this->thoughtSignatures[$toolCall->id];
-                }
-                $parts[] = $part;
-            }
-        } elseif (is_array($message->content)) {
-            // Multimodal content
-            $parts = $this->convertMultimodalContent($message->content);
-        } else {
-            // Simple text
-            $parts[] = ['text' => $message->content];
+            $callId = (string) $message->toolCallId;
+            $result = is_string($message->content) ? $message->content : (string) json_encode($message->content);
+
+            return [[
+                'type' => 'function_result',
+                'name' => $this->callNames[$callId] ?? $callId,
+                'call_id' => $callId,
+                'result' => [['type' => 'text', 'text' => $result]],
+            ]];
         }
 
-        return [
-            'role' => $role,
-            'parts' => $parts,
-        ];
+        if ($message->hasToolCalls()) {
+            foreach ($message->toolCalls as $toolCall) {
+                if (isset($this->turnSteps[$toolCall->id])) {
+                    return $this->turnSteps[$toolCall->id];
+                }
+            }
+
+            $items = [];
+
+            if ($message->getText() !== '') {
+                $items[] = ['type' => 'model_output', 'content' => [['type' => 'text', 'text' => $message->getText()]]];
+            }
+
+            foreach ($message->toolCalls as $toolCall) {
+                $items[] = ['type' => 'function_call', 'id' => $toolCall->id, 'name' => $toolCall->name, 'arguments' => (object) $toolCall->arguments];
+            }
+
+            return $items;
+        }
+
+        if ($message->role === Role::Assistant) {
+            return [['type' => 'model_output', 'content' => [['type' => 'text', 'text' => $message->getText()]]]];
+        }
+
+        $content = is_array($message->content)
+            ? $this->convertMultimodalContent($message->content)
+            : [['type' => 'text', 'text' => $message->content]];
+
+        return [['type' => 'user_input', 'content' => $content]];
     }
 
     /**
-     * Convert multimodal content parts (text + images) to Gemini format.
+     * Convert multimodal parts to Interactions content parts. Images travel inline as base64; a
+     * URL is fetched first.
      *
-     * Translates PapiAI's content array format into Gemini's parts format.
-     * Images are converted to either fileData (for URLs) or inlineData (for base64).
+     * @param array<array{type: string, text?: string, source?: array}> $content
      *
-     * @param array<array{type: string, text?: string, source?: array}> $content Multimodal content parts
+     * @return list<array<string, string>>
      *
-     * @return array<array> Gemini-formatted parts array
+     * @throws RuntimeException When an image URL cannot be fetched
      */
     private function convertMultimodalContent(array $content): array
     {
@@ -1253,51 +1264,50 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
 
         foreach ($content as $part) {
             if ($part['type'] === 'text') {
-                $parts[] = ['text' => $part['text']];
-            } elseif ($part['type'] === 'image') {
-                $source = $part['source'];
-                if ($source['type'] === 'url') {
-                    // Gemini supports URL images directly via fileData
-                    $parts[] = [
-                        'fileData' => [
-                            'mimeType' => $source['media_type'] ?? 'image/jpeg',
-                            'fileUri' => $source['url'],
-                        ],
-                    ];
-                } else {
-                    // Base64 inline data
-                    $parts[] = [
-                        'inlineData' => [
-                            'mimeType' => $source['media_type'],
-                            'data' => $source['data'],
-                        ],
-                    ];
-                }
+                $parts[] = ['type' => 'text', 'text' => $part['text']];
+
+                continue;
             }
+
+            if ($part['type'] !== 'image') {
+                continue;
+            }
+
+            $source = $part['source'];
+
+            if ($source['type'] === 'url') {
+                $bytes = $this->fetchImage($source['url']);
+
+                if ($bytes === false) {
+                    throw new RuntimeException(sprintf('Failed to fetch image from "%s".', $source['url']));
+                }
+
+                $parts[] = ['type' => 'image', 'mime_type' => $source['media_type'] ?? $this->detectMimeType($source['url'], $bytes), 'data' => base64_encode($bytes)];
+
+                continue;
+            }
+
+            $parts[] = ['type' => 'image', 'mime_type' => $source['media_type'], 'data' => $source['data']];
         }
 
         return $parts;
     }
 
     /**
-     * Convert PapiAI tool definitions to Gemini's functionDeclarations format.
+     * Convert PapiAI tool definitions to Interactions function tools.
      *
-     * Maps each tool's name, description, and input schema (JSON Schema) into
-     * the structure expected by Gemini's tools API. Only array-format tools
-     * are supported; object-format tools are skipped.
+     * @param array<array{name: string, description: string, input_schema?: array, parameters?: array}> $tools
      *
-     * @param array<array{name: string, description: string, input_schema?: array, parameters?: array}> $tools PapiAI tool definitions
-     *
-     * @return array<array{name: string, description: string, parameters: array}> Gemini function declarations
+     * @return list<array{type: string, name: string, description: string, parameters: array}>
      */
     private function convertTools(array $tools): array
     {
-        $declarations = [];
+        $declared = [];
 
         foreach ($tools as $tool) {
-            // Handle both array format (from Tool::toAnthropic) and object
             if (is_array($tool)) {
-                $declarations[] = [
+                $declared[] = [
+                    'type' => 'function',
                     'name' => $tool['name'],
                     'description' => $tool['description'],
                     'parameters' => $tool['input_schema'] ?? $tool['parameters'] ?? ['type' => 'object', 'properties' => []],
@@ -1305,90 +1315,53 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
             }
         }
 
-        return $declarations;
+        return $declared;
     }
 
     /**
-     * Parse a Gemini API response into a PapiAI Response object.
+     * Read the model's turn out of an interaction: text from model_output steps, calls from
+     * function_call steps. Thought steps are kept only for replay.
      *
-     * Extracts text content, function calls (with thought signatures for multi-turn),
-     * token usage metadata, and the finish reason from the first candidate. Tool call
-     * thought signatures are cached in $this->thoughtSignatures so they can be
-     * re-attached when converting the assistant's tool call message back to Gemini format.
-     *
-     * @param array          $response Raw decoded JSON response from the Gemini API
-     * @param array<Message> $messages Original conversation messages (passed through to Response)
-     *
-     * @return Response Parsed response with text, tool calls, usage stats, and stop reason
+     * @param array<string, mixed> $response Raw decoded body
+     * @param array<Message>       $messages The conversation this answers
      */
     private function parseResponse(array $response, array $messages): Response
     {
-        $candidate = $response['candidates'][0] ?? [];
-        $content = $candidate['content'] ?? [];
-        $parts = $content['parts'] ?? [];
-
         $text = '';
         $toolCalls = [];
+        $steps = $response['steps'] ?? [];
 
-        foreach ($parts as $part) {
-            if (isset($part['text'])) {
-                $text .= $part['text'];
-            } elseif (isset($part['functionCall'])) {
-                $fc = $part['functionCall'];
-                $toolCall = new ToolCall(
-                    id: $fc['name'], // Gemini uses name as ID
-                    name: $fc['name'],
-                    arguments: $fc['args'] ?? [],
-                );
-                if (isset($part['thoughtSignature'])) {
-                    $this->thoughtSignatures[$toolCall->id] = $part['thoughtSignature'];
+        foreach ($steps as $step) {
+            $type = $step['type'] ?? '';
+
+            if ($type === 'model_output') {
+                foreach ($step['content'] ?? [] as $part) {
+                    if (($part['type'] ?? '') === 'text') {
+                        $text .= $part['text'] ?? '';
+                    }
                 }
+            }
+
+            if ($type === 'function_call') {
+                $arguments = $step['arguments'] ?? [];
+                $toolCall = new ToolCall(
+                    id: (string) ($step['id'] ?? $step['name'] ?? ''),
+                    name: (string) ($step['name'] ?? ''),
+                    arguments: is_array($arguments) ? $arguments : (json_decode((string) $arguments, true) ?? []),
+                );
+                $this->callNames[$toolCall->id] = $toolCall->name;
+                $this->turnSteps[$toolCall->id] = array_values($steps);
                 $toolCalls[] = $toolCall;
             }
         }
-
-        $usage = [];
-        if (isset($response['usageMetadata'])) {
-            $usage = [
-                'input_tokens' => $response['usageMetadata']['promptTokenCount'] ?? 0,
-                'output_tokens' => $response['usageMetadata']['candidatesTokenCount'] ?? 0,
-            ];
-        }
-
-        $stopReason = $candidate['finishReason'] ?? null;
 
         return new Response(
             text: $text,
             toolCalls: $toolCalls,
             messages: $messages,
-            usage: $usage,
-            stopReason: $stopReason,
+            usage: $this->usageOf($response['usage'] ?? []),
+            stopReason: $this->stopReasonOf($response, $toolCalls !== []),
         );
-    }
-
-    /**
-     * Extract concatenated text from a single streaming SSE event.
-     *
-     * Iterates through all parts of the first candidate and concatenates any
-     * text parts. Non-text parts (e.g., function calls) are ignored during streaming.
-     *
-     * @param array $event A single decoded SSE event from the streaming response
-     *
-     * @return string The extracted text, or empty string if no text parts exist
-     */
-    private function extractTextFromCandidate(array $event): string
-    {
-        $candidate = $event['candidates'][0] ?? [];
-        $parts = $candidate['content']['parts'] ?? [];
-
-        $text = '';
-        foreach ($parts as $part) {
-            if (isset($part['text'])) {
-                $text .= $part['text'];
-            }
-        }
-
-        return $text;
     }
 
     /**
@@ -1418,6 +1391,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HTTPHEADER => [
                 'Content-Type: application/json',
+                'x-goog-api-key: ' . $this->apiKey,
             ],
         ]);
 
@@ -1549,6 +1523,7 @@ class GoogleProvider implements ProviderInterface, ImageProviderInterface, Embed
             CURLOPT_POSTFIELDS => json_encode($payload),
             CURLOPT_HTTPHEADER => [
                 'Content-Type: application/json',
+                'x-goog-api-key: ' . $this->apiKey,
             ],
             CURLOPT_WRITEFUNCTION => function ($ch, $data) use (&$buffer) {
                 $buffer .= $data;

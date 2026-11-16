@@ -19,7 +19,8 @@ use PapiAI\Google\GoogleProvider;
 describe('GeminiModel', function () {
     it('is the source of truth the old constants alias', function () {
         expect(GoogleProvider::MODEL_3_6_FLASH)->toBe(GeminiModel::Flash36->value);
-        expect(GoogleProvider::MODEL_3_8_FLASH)->toBe('gemini-3.8-flash');
+        expect(GoogleProvider::MODEL_4_CARBON)->toBe('gemini-4-carbon');
+        expect(GoogleProvider::MODEL_EMBEDDING_2)->toBe('gemini-embedding-2');
         expect(GoogleProvider::IMAGEN_4)->toBe(GeminiModel::Imagen4->value);
         expect(GoogleProvider::MODEL_VEO_3_1)->toBe(GeminiModel::Veo31->value);
     });
@@ -34,23 +35,23 @@ describe('GeminiModel', function () {
         expect($ids)->toBe(array_unique($ids));
     });
 
-    it('takes a level from Gemini 3 on and a budget before', function () {
-        expect(GeminiModel::Flash38->takesThinkingLevel())->toBeTrue();
-        expect(GeminiModel::Pro31->takesThinkingLevel())->toBeTrue();
-        expect(GeminiModel::Flash25->takesThinkingLevel())->toBeFalse();
-        expect(GeminiModel::Pro25->takesThinkingLevel())->toBeFalse();
+    it('knows the Gemini 4 line and what each takes', function () {
+        expect(GeminiModel::from('gemini-4-hydrogen'))->toBe(GeminiModel::Hydrogen4);
+        expect(GeminiModel::Hydrogen4->effortLevels())->toBe([Effort::Low, Effort::Medium, Effort::High, Effort::ExtraHigh]);
+        expect(GeminiModel::Carbon4->effortLevels())->toBe([Effort::Low, Effort::Medium, Effort::High]);
+        expect(GeminiModel::Flash36->effortLevels())->toBe([Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]);
+        expect(GeminiModel::Flash38->effortLevels())->toBe([Effort::Low, Effort::Medium, Effort::High]);
     });
 
-    it('keeps Pro off MINIMAL and gives Flash all four levels', function () {
-        expect(GeminiModel::Pro31->effortLevels())->toBe([Effort::Low, Effort::Medium, Effort::High]);
-        expect(GeminiModel::Flash38->effortLevels())->toBe([Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]);
-        expect(GeminiModel::Flash25->effortLevels())->toBe([]);
+    it('knows which models ignore sampling parameters', function () {
+        expect(GeminiModel::Flash38->acceptsSampling())->toBeFalse();
+        expect(GeminiModel::Argon4->acceptsSampling())->toBeFalse();
+        expect(GeminiModel::Flash25->acceptsSampling())->toBeTrue();
     });
 
-    it('lets only the pre-3 Flash families disable thinking', function () {
-        expect(GeminiModel::Flash25->canDisableThinking())->toBeTrue();
-        expect(GeminiModel::Pro25->canDisableThinking())->toBeFalse();
-        expect(GeminiModel::Flash38->canDisableThinking())->toBeFalse();
+    it('knows the one model that is off by default', function () {
+        expect(GeminiModel::Flash25Lite->thinksByDefault())->toBeFalse();
+        expect(GeminiModel::Flash38->thinksByDefault())->toBeTrue();
     });
 
     it('knows the dead ones, their dates and their successors', function () {

@@ -36,10 +36,11 @@ echo $response->text;
 ### Gemini (text and chat)
 
 ```php
+GoogleProvider::MODEL_4_HYDROGEN     // 'gemini-4-hydrogen'
+GoogleProvider::MODEL_4_CARBON       // 'gemini-4-carbon'
+GoogleProvider::MODEL_4_ARGON        // 'gemini-4-argon'
 GoogleProvider::MODEL_3_8_FLASH      // 'gemini-3.8-flash' (default)
-GoogleProvider::MODEL_3_7_FLASH      // 'gemini-3.7-flash'
 GoogleProvider::MODEL_3_6_FLASH      // 'gemini-3.6-flash'
-GoogleProvider::MODEL_3_5_FLASH      // 'gemini-3.5-flash'
 GoogleProvider::MODEL_3_5_FLASH_LITE // 'gemini-3.5-flash-lite'
 GoogleProvider::MODEL_3_1_PRO        // 'gemini-3.1-pro-preview'
 GoogleProvider::MODEL_3_FLASH        // 'gemini-3-flash-preview'
@@ -51,6 +52,7 @@ GoogleProvider::MODEL_2_5_FLASH      // 'gemini-2.5-flash'
 
 ```php
 GoogleProvider::MODEL_3_1_FLASH_IMAGE      // 'gemini-3.1-flash-image' (default)
+GoogleProvider::MODEL_NANO_BANANA_2_1      // 'gemini-nano-banana-2.1'
 GoogleProvider::MODEL_3_1_FLASH_LITE_IMAGE // 'gemini-3.1-flash-lite-image'
 GoogleProvider::MODEL_3_PRO_IMAGE          // 'gemini-3-pro-image'
 GoogleProvider::MODEL_2_5_FLASH_IMAGE      // 'gemini-2.5-flash-image'
@@ -60,12 +62,29 @@ The Imagen constants are still here but every one of them is `@deprecated`: the 
 shuts down on **17 August 2026**, and its `:predict` endpoint has no successor. Use the Gemini
 image models above.
 
+### Embeddings
+
+```php
+GoogleProvider::MODEL_EMBEDDING_2   // 'gemini-embedding-2' (default, 3072 dimensions)
+GoogleProvider::MODEL_EMBEDDING_001 // 'gemini-embedding-001'
+```
+
+Pass `dimensions` (768, 1536 or 3072) to truncate the vector.
+
 ### Video generation
 
 ```php
 GoogleProvider::MODEL_VEO_3_1      // 'veo-3.1-generate-preview' (default)
 GoogleProvider::MODEL_VEO_3_1_LITE // 'veo-3.1-lite-generate-preview'
 ```
+
+## Endpoint
+
+Chat, streaming, tools, structured output and images go through Google's Interactions API
+(`POST /v1beta/interactions`), which Google now recommends; `generateContent` is legacy there.
+The system message travels as `system_instruction`, effort as `generation_config.thinking_level`,
+and each request carries the full conversation (`store: false`). Embeddings and Veo keep their own
+endpoints. Gemini 3.6 and later ignore `temperature`, so passing one throws before the request.
 
 ## Features
 

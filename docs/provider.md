@@ -34,10 +34,11 @@ echo $response->text;
 ### Chat Models
 
 ```php
+GoogleProvider::MODEL_4_HYDROGEN     // gemini-4-hydrogen
+GoogleProvider::MODEL_4_CARBON       // gemini-4-carbon
+GoogleProvider::MODEL_4_ARGON        // gemini-4-argon
 GoogleProvider::MODEL_3_8_FLASH      // gemini-3.8-flash (default)
-GoogleProvider::MODEL_3_7_FLASH      // gemini-3.7-flash
 GoogleProvider::MODEL_3_6_FLASH      // gemini-3.6-flash
-GoogleProvider::MODEL_3_5_FLASH      // gemini-3.5-flash
 GoogleProvider::MODEL_3_5_FLASH_LITE // gemini-3.5-flash-lite
 GoogleProvider::MODEL_3_1_PRO        // gemini-3.1-pro-preview
 GoogleProvider::MODEL_3_FLASH        // gemini-3-flash-preview
@@ -51,6 +52,7 @@ GoogleProvider::MODEL_2_0_FLASH      // gemini-2.0-flash
 
 ```php
 GoogleProvider::MODEL_3_1_FLASH_IMAGE      // gemini-3.1-flash-image (default)
+GoogleProvider::MODEL_NANO_BANANA_2_1      // gemini-nano-banana-2.1
 GoogleProvider::MODEL_3_1_FLASH_LITE_IMAGE // gemini-3.1-flash-lite-image
 GoogleProvider::MODEL_3_PRO_IMAGE          // gemini-3-pro-image
 GoogleProvider::MODEL_2_5_FLASH_IMAGE      // gemini-2.5-flash-image
@@ -59,10 +61,19 @@ GoogleProvider::MODEL_2_5_FLASH_IMAGE      // gemini-2.5-flash-image
 The `IMAGEN_*` constants remain for backwards compatibility and are all `@deprecated`. Imagen
 shuts down on 17 August 2026 and its separate `:predict` endpoint goes with it.
 
+### Embedding Models
+
+```php
+GoogleProvider::MODEL_EMBEDDING_2   // gemini-embedding-2 (default, 3072 dimensions)
+GoogleProvider::MODEL_EMBEDDING_001 // gemini-embedding-001
+```
+
+Pass `dimensions` (768, 1536 or 3072) to truncate the vector.
+
 ## Image Generation
 
-Image generation and editing both go through `generateContent`, asking for an image modality
-back. There is no separate endpoint any more.
+Image generation and editing go through the Interactions API, asking for an image back through
+`response_format`.
 
 ```php
 use PapiAI\Google\GoogleProvider;
