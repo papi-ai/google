@@ -138,6 +138,11 @@ echo $result['text'];
 | Forced tool choice | Yes, including a named tool |
 | Reasoning effort | Yes |
 
+Thinking counts against `maxTokens`. Current Gemini models think before they answer, and even a one-line question
+can use a couple of hundred tokens at the default effort, so a small ceiling can run out before the
+answer: with `outputSchema`, what comes back is then cut-off prose rather than JSON.
+`$response->isTruncated()` reports it; raise `maxTokens` or lower `effort`.
+
 ## Creating It by Name
 
 An application that picks its provider from configuration can build this one without naming

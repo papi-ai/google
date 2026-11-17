@@ -96,6 +96,11 @@ endpoints. Gemini 3.6 and later ignore `temperature`, so passing one throws befo
 - Image generation and editing
 - Video generation and text embeddings
 
+Thinking counts against `maxTokens`. Current Gemini models think before they answer, and even a one-line question
+can use a couple of hundred tokens at the default effort, so a small ceiling can run out before the
+answer: with `outputSchema`, what comes back is then cut-off prose rather than JSON.
+`$response->isTruncated()` reports it; raise `maxTokens` or lower `effort`.
+
 ## Image Generation
 
 ```php
