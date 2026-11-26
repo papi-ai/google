@@ -95,20 +95,20 @@ describe('GoogleProvider on the Interactions API', function () {
 
         it('declares tools as function tools', function () {
             ($this->chat)([Message::user('Hi')], ['tools' => [
-                ['name' => 'get_weather', 'description' => 'Weather', 'parameters' => ['type' => 'object', 'properties' => []]],
+                ['name' => 'get_weather', 'description' => 'Weather', 'parameters' => ['type' => 'object', 'properties' => ['city' => ['type' => 'string']]]],
             ]]);
 
             expect($this->provider->lastPayload['tools'])->toBe([[
                 'type' => 'function', 'name' => 'get_weather', 'description' => 'Weather',
-                'parameters' => ['type' => 'object', 'properties' => []],
+                'parameters' => ['type' => 'object', 'properties' => ['city' => ['type' => 'string']]],
             ]]);
         });
 
         it('asks for JSON through response_format', function () {
-            ($this->chat)([Message::user('Hi')], ['outputSchema' => ['type' => 'object', 'properties' => []]]);
+            ($this->chat)([Message::user('Hi')], ['outputSchema' => ['type' => 'object', 'properties' => ['city' => ['type' => 'string']]]]);
 
             expect($this->provider->lastPayload['response_format'])->toBe([
-                'type' => 'text', 'mime_type' => 'application/json', 'schema' => ['type' => 'object', 'properties' => []],
+                'type' => 'text', 'mime_type' => 'application/json', 'schema' => ['type' => 'object', 'properties' => ['city' => ['type' => 'string']]],
             ]);
         });
 
